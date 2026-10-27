@@ -2164,7 +2164,7 @@ static bool canFoldSplitIntoDenseLoad(Value value) {
   auto tensor = value.getDefiningOp<bufferization::ToTensorOp>();
   if (!tensor)
     return false;
-  Value buffer = tensor.getMemref();
+  Value buffer = tensor->getOperand(0);
   if (!buffer.getDefiningOp<memref::AllocOp>())
     return false;
   memref::CopyOp copy;
@@ -2181,7 +2181,7 @@ static bool canFoldSplitIntoDenseLoad(Value value) {
   auto type = cast<MemRefType>(copy.getSource().getType());
   SmallVector<int64_t> strides;
   int64_t offset;
-  if (!type.hasStaticShape() || failed(getStridesAndOffset(type, strides, offset)))
+  if (!type.hasStaticShape() || failed(type.getStridesAndOffset(strides, offset)))
     return false;
   int64_t expected = 1;
   for (int dim = type.getRank() - 1; dim >= 0; --dim) {
