@@ -273,8 +273,27 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
       ++shift;
   }
   Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{count}, elemType);
-  Value gathered = rewriter.create<hivm::VGatherOp>(
-      loc, TypeRange{flatType}, flat, index, empty)->getResult(0);
+  // CANN's built-in VGather implementation assumes physical unit strides.
+  // Preserve the logical contract with the backend-owned implementation;
+  // its custom-op boundary also prevents unrelated operand stride alignment.
+  Value addresses = rewriter.create<bufferization::AllocTensorOp>(
+      loc, indexType, ValueRange{});
+  Value scratch = rewriter.create<bufferization::AllocTensorOp>(
+      loc, flatType, ValueRange{});
+  StringRef suffix = elemType.isF16() ? "half" : elemType.isBF16() ? "bf16" :
+                     elemType.isF32() ? "float" :
+                     elemType.isInteger(16) ? "int16" : "int32";
+  auto gather = rewriter.create<hivm::CustomOp>(
+      loc, TypeRange{flatType, indexType, flatType}, "flagtree.structured_gather",
+      ValueRange{flat, index}, ValueRange{empty, addresses, scratch}, ValueRange{});
+  gather.setCoreType(hivm::TCoreType::VECTOR);
+  gather.setPipe(hivm::PIPE::PIPE_V);
+  gather.setVFMode(hivm::VFMode::SIMD);
+  gather->setAttr("symbol", rewriter.getStringAttr(
+      ("custom_flagtree_stride_gather_" + suffix).str()));
+  gather->setAttr("max_rank", rewriter.getI64IntegerAttr(1));
+  gather->setAttr("no_side_effect", rewriter.getUnitAttr());
+  Value gathered = gather->getResult(0);
   Value resultShape = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI64TensorAttr(resultType.getShape()));
   return rewriter.create<tensor::ReshapeOp>(loc, resultType, gathered, resultShape);
