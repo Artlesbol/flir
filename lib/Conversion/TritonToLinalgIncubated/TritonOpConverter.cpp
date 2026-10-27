@@ -251,7 +251,7 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
       loc, DenseIntElementsAttr::get(indexType, ArrayRef<int32_t>(indices)));
   Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{count}, elemType);
   Value gathered = rewriter.create<hivm::VGatherOp>(
-      loc, TypeRange{flatType}, flat, index, empty).getResult(0);
+      loc, TypeRange{flatType}, flat, index, empty)->getResult(0);
   Value resultShape = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI64TensorAttr(resultType.getShape()));
   return rewriter.create<tensor::ReshapeOp>(loc, resultType, gathered, resultShape);
