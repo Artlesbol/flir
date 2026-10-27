@@ -115,3 +115,19 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
     return
   }
 }
+
+// -----
+
+// Large byte joins retain the existing packed interleave before widening.
+// CHECK-LABEL: func.func @large_byte_join(
+// CHECK-NOT: custom_flagtree_
+// CHECK: tensor.insert_slice
+// CHECK: tensor.insert_slice
+// CHECK-NOT: custom_flagtree_
+// CHECK: return
+module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+  func.func @large_byte_join(%a: tensor<4096xi8>, %b: tensor<4096xi8>) -> tensor<4096x2xi8> {
+    %y = tt.join %a, %b : tensor<4096xi8> -> tensor<4096x2xi8>
+    return %y : tensor<4096x2xi8>
+  }
+}
