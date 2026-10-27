@@ -192,7 +192,7 @@ BitcastConverter::matchAndRewrite(triton::BitcastOp op, OpAdaptor adaptor,
 
 // Small innermost axes otherwise become one padded UB row per few elements.
 // Express their static permutation as a single packed vector gather instead.
-// Bound the index table to 16 KiB so a large transpose retains native tiling.
+// Bound the index buffer to 16 KiB so a large transpose retains native tiling.
 // This is a code-generation choice for a constant permutation, not a dynamic
 // Triton gather, and preserves the exact bit pattern of every element.
 static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
@@ -228,27 +228,50 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
        resultType.getShape().back() >= blockElements))
     return {};
 
+  // Power-of-two axes permit exact vector shift/mask index generation.
+  // Non-splat tensor constants bufferize to untagged memref globals in CANN 9;
+  // feeding those directly to VGather crashes its stride-alignment pass.
+  // Generate the static permutation's addresses in UB instead.
+  for (int64_t dim : srcType.getShape())
+    if (dim <= 0 || (dim & (dim - 1)))
+      return {};
   SmallVector<int64_t> srcStrides(srcType.getRank(), 1);
   for (int i = srcType.getRank() - 2; i >= 0; --i)
     srcStrides[i] = srcStrides[i + 1] * srcType.getDimSize(i + 1);
-  SmallVector<int32_t> indices;
-  indices.reserve(count);
-  for (int64_t i = 0; i < count; ++i) {
-    int64_t remaining = i, offset = 0;
-    for (int dim = resultType.getRank() - 1; dim >= 0; --dim) {
-      int64_t coord = remaining % resultType.getDimSize(dim);
-      remaining /= resultType.getDimSize(dim);
-      offset += coord * srcStrides[order[dim]];
-    }
-    indices.push_back(static_cast<int32_t>(offset));
-  }
   auto flatType = RankedTensorType::get({count}, elemType);
   Value flatShape = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI64TensorAttr({count}));
   Value flat = rewriter.create<tensor::ReshapeOp>(loc, flatType, src, flatShape);
   auto indexType = RankedTensorType::get({count}, rewriter.getI32Type());
-  Value index = rewriter.create<arith::ConstantOp>(
-      loc, DenseIntElementsAttr::get(indexType, ArrayRef<int32_t>(indices)));
+  Value indexEmpty = rewriter.create<tensor::EmptyOp>(
+      loc, ArrayRef<int64_t>{count}, rewriter.getI32Type());
+  Value range = rewriter.create<hivm::VArangeOp>(
+      loc, TypeRange{indexType}, indexEmpty)->getResult(0);
+  auto splat = [&](int64_t value) -> Value {
+    auto attr = DenseIntElementsAttr::get(
+        indexType, ArrayRef<int32_t>{static_cast<int32_t>(value)});
+    return rewriter.create<arith::ConstantOp>(loc, attr);
+  };
+  Value index;
+  int shift = 0;
+  for (int dim = resultType.getRank() - 1; dim >= 0; --dim) {
+    int64_t size = resultType.getDimSize(dim);
+    if (size == 1)
+      continue;
+    Value coord = range;
+    if (shift)
+      coord = rewriter.create<arith::ShRUIOp>(loc, coord, splat(shift));
+    coord = rewriter.create<arith::AndIOp>(loc, coord, splat(size - 1));
+    int64_t stride = srcStrides[order[dim]];
+    if (stride != 1)
+      coord = rewriter.create<arith::MulIOp>(loc, coord, splat(stride));
+    if (index)
+      index = rewriter.create<arith::AddIOp>(loc, index, coord);
+    else
+      index = coord;
+    for (int64_t width = size; width > 1; width /= 2)
+      ++shift;
+  }
   Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{count}, elemType);
   Value gathered = rewriter.create<hivm::VGatherOp>(
       loc, TypeRange{flatType}, flat, index, empty)->getResult(0);
