@@ -2242,8 +2242,8 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
     Value flat = reshape(input, {2 * count});
     auto flatType = RankedTensorType::get({count}, storageElement);
     auto indexType = RankedTensorType::get({count}, rewriter.getI32Type());
-    Value lhs = rewriter.create<tensor::EmptyOp>(loc, flatType.getShape(), storageElement);
-    Value rhs = rewriter.create<tensor::EmptyOp>(loc, flatType.getShape(), storageElement);
+    Value lhs = rewriter.create<bufferization::AllocTensorOp>(loc, flatType, ValueRange{});
+    Value rhs = rewriter.create<bufferization::AllocTensorOp>(loc, flatType, ValueRange{});
     Value addresses = rewriter.create<bufferization::AllocTensorOp>(loc, indexType, ValueRange{});
     StringRef suffix = storageElement.isF16() ? "half" : storageElement.isBF16() ? "bf16" :
                        storageElement.isF32() ? "float" : storageElement.isInteger(16) ? "int16" : "int32";
