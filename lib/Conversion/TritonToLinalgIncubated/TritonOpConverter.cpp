@@ -221,15 +221,25 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
     // Widen storage only; truncation restores the original bits exactly.
     auto wideSrcType = RankedTensorType::get(srcType.getShape(), rewriter.getI16Type());
     auto wideResultType = RankedTensorType::get(resultType.getShape(), rewriter.getI16Type());
+    int64_t count = srcType.getNumElements();
+    auto narrowFlatType = RankedTensorType::get({count}, elemType);
+    auto wideFlatType = RankedTensorType::get({count}, rewriter.getI16Type());
+    Value flatShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({count}));
+    Value flat = rewriter.create<tensor::ReshapeOp>(loc, narrowFlatType, src, flatShape);
     Value wide;
     if (cast<IntegerType>(elemType).isUnsigned() || elemType.isInteger(1))
-      wide = rewriter.create<arith::ExtUIOp>(loc, wideSrcType, src);
+      wide = rewriter.create<arith::ExtUIOp>(loc, wideFlatType, flat);
     else
-      wide = rewriter.create<arith::ExtSIOp>(loc, wideSrcType, src);
+      wide = rewriter.create<arith::ExtSIOp>(loc, wideFlatType, flat);
+    Value srcShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(srcType.getShape()));
+    wide = rewriter.create<tensor::ReshapeOp>(loc, wideSrcType, wide, srcShape);
     Value permuted = tryPackedVectorTranspose(wide, wideResultType, order, loc, rewriter);
     if (!permuted)
       return {};
-    return rewriter.create<arith::TruncIOp>(loc, resultType, permuted);
+    Value wideFlat = rewriter.create<tensor::ReshapeOp>(loc, wideFlatType, permuted, flatShape);
+    Value narrowed = rewriter.create<arith::TruncIOp>(loc, narrowFlatType, wideFlat);
+    Value resultShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(resultType.getShape()));
+    return rewriter.create<tensor::ReshapeOp>(loc, resultType, narrowed, resultShape);
   }
   if (!elemType.isIntOrFloat() ||
       (elemType.getIntOrFloatBitWidth() != 16 &&
@@ -2003,8 +2013,11 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   auto originalResultType = resultType;
   bool narrow = elemType.isInteger(8) || elemType.isInteger(1);
   if (narrow) {
-    auto wideType = RankedTensorType::get(inputType.getShape(), rewriter.getI16Type());
+    auto wideType = RankedTensorType::get({count}, rewriter.getI16Type());
+    auto narrowType = RankedTensorType::get({count}, elemType);
+    Value flatShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({count}));
     auto extend = [&](Value value) -> Value {
+      value = rewriter.create<tensor::ReshapeOp>(loc, narrowType, value, flatShape);
       if (cast<IntegerType>(elemType).isUnsigned() || elemType.isInteger(1))
         return rewriter.create<arith::ExtUIOp>(loc, wideType, value);
       return rewriter.create<arith::ExtSIOp>(loc, wideType, value);
@@ -2015,8 +2028,15 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
     resultType = RankedTensorType::get(resultType.getShape(), elemType);
   }
   auto finish = [&](Value value) {
-    if (narrow)
-      value = rewriter.create<arith::TruncIOp>(loc, originalResultType, value);
+    if (narrow) {
+      Value flatShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({2 * count}));
+      auto wideFlatType = RankedTensorType::get({2 * count}, elemType);
+      auto narrowFlatType = RankedTensorType::get({2 * count}, originalResultType.getElementType());
+      value = rewriter.create<tensor::ReshapeOp>(loc, wideFlatType, value, flatShape);
+      value = rewriter.create<arith::TruncIOp>(loc, narrowFlatType, value);
+      Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(originalResultType.getShape()));
+      value = rewriter.create<tensor::ReshapeOp>(loc, originalResultType, value, shape);
+    }
     rewriter.replaceOp(op, value);
   };
   // Keep the two channels compact before transposition. The stride-2 slice
@@ -2260,7 +2280,10 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
     int64_t count = outType.getNumElements();
     Type storageElement = narrow ? rewriter.getI16Type() : element;
     if (narrow) {
-      auto wideType = RankedTensorType::get(inputType.getShape(), storageElement);
+      auto narrowFlatType = RankedTensorType::get({2 * count}, element);
+      auto wideType = RankedTensorType::get({2 * count}, storageElement);
+      Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({2 * count}));
+      input = rewriter.create<tensor::ReshapeOp>(loc, narrowFlatType, input, shape);
       if (cast<IntegerType>(element).isUnsigned() || element.isInteger(1))
         input = rewriter.create<arith::ExtUIOp>(loc, wideType, input);
       else
@@ -2292,9 +2315,15 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
     split->setAttr("no_side_effect", rewriter.getUnitAttr());
     SmallVector<Value> results;
     for (int channel = 0; channel < 2; ++channel) {
-      Value result = reshape(split->getResult(channel), outType.getShape());
-      if (narrow)
-        result = rewriter.create<arith::TruncIOp>(loc, outType, result);
+      Value result = split->getResult(channel);
+      if (narrow) {
+        auto narrowFlatType = RankedTensorType::get({count}, element);
+        result = rewriter.create<arith::TruncIOp>(loc, narrowFlatType, result);
+        Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(outType.getShape()));
+        result = rewriter.create<tensor::ReshapeOp>(loc, outType, result, shape);
+      } else {
+        result = reshape(result, outType.getShape());
+      }
       results.push_back(result);
     }
     rewriter.replaceOp(op, results);
