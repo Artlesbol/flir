@@ -93,8 +93,8 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
   func.func @reshape_changes_outer_axis(%x: tensor<4x32xf32>) -> (tensor<16x4xf32>, tensor<16x4xf32>) {
     %t = tt.trans %x {order = array<i32: 1, 0>} : tensor<4x32xf32> -> tensor<32x4xf32>
-    %r = tt.reshape %t : tensor<32x4xf32> -> tensor<16x8xf32>
-    %a, %b = tt.split %r : tensor<16x8xf32> -> tensor<16x4xf32>
+    %r = tt.reshape %t : tensor<32x4xf32> -> tensor<16x4x2xf32>
+    %a, %b = tt.split %r : tensor<16x4x2xf32> -> tensor<16x4xf32>
     return %a, %b : tensor<16x4xf32>, tensor<16x4xf32>
   }
 }
