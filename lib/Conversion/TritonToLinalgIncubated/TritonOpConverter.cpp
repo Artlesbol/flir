@@ -190,12 +190,70 @@ BitcastConverter::matchAndRewrite(triton::BitcastOp op, OpAdaptor adaptor,
   return success();
 }
 
+// Small innermost axes otherwise become one padded UB row per few elements.
+// Express their static permutation as a single packed vector gather instead.
+// Bound the index table to 16 KiB so a large transpose retains native tiling.
+// This is a code-generation choice for a constant permutation, not a dynamic
+// Triton gather, and preserves the exact bit pattern of every element.
+static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
+                                     ArrayRef<int> order, Location loc,
+                                     ConversionPatternRewriter &rewriter) {
+  auto srcType = dyn_cast<RankedTensorType>(src.getType());
+  if (!srcType || !srcType.hasStaticShape() || srcType.getEncoding() ||
+      resultType.getEncoding() || order.empty())
+    return {};
+  auto elemType = srcType.getElementType();
+  if (!elemType.isIntOrFloat() ||
+      (elemType.getIntOrFloatBitWidth() != 16 &&
+       elemType.getIntOrFloatBitWidth() != 32))
+    return {};
+  int64_t count = srcType.getNumElements();
+  int64_t blockElements = 32 / (elemType.getIntOrFloatBitWidth() / 8);
+  if (count < blockElements || count > 4096 ||
+      order.back() == srcType.getRank() - 1 ||
+      (srcType.getShape().back() >= blockElements &&
+       resultType.getShape().back() >= blockElements))
+    return {};
+
+  SmallVector<int64_t> srcStrides(srcType.getRank(), 1);
+  for (int i = srcType.getRank() - 2; i >= 0; --i)
+    srcStrides[i] = srcStrides[i + 1] * srcType.getDimSize(i + 1);
+  SmallVector<int32_t> indices;
+  indices.reserve(count);
+  for (int64_t i = 0; i < count; ++i) {
+    int64_t remaining = i, offset = 0;
+    for (int dim = resultType.getRank() - 1; dim >= 0; --dim) {
+      int64_t coord = remaining % resultType.getDimSize(dim);
+      remaining /= resultType.getDimSize(dim);
+      offset += coord * srcStrides[order[dim]];
+    }
+    indices.push_back(static_cast<int32_t>(offset));
+  }
+  auto flatType = RankedTensorType::get({count}, elemType);
+  Value flatShape = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getI64TensorAttr({count}));
+  Value flat = rewriter.create<tensor::ReshapeOp>(loc, flatType, src, flatShape);
+  auto indexType = RankedTensorType::get({count}, rewriter.getI32Type());
+  Value index = rewriter.create<arith::ConstantOp>(
+      loc, DenseIntElementsAttr::get(indexType, ArrayRef<int32_t>(indices)));
+  Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{count}, elemType);
+  Value gathered = rewriter.create<hivm::VGatherOp>(
+      loc, TypeRange{flatType}, flat, index, empty).getResult(0);
+  Value resultShape = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getI64TensorAttr(resultType.getShape()));
+  return rewriter.create<tensor::ReshapeOp>(loc, resultType, gathered, resultShape);
+}
+
 LogicalResult
 TransposeConverter::matchAndRewrite(triton::TransOp op, OpAdaptor adaptor,
                                     ConversionPatternRewriter &rewriter) const {
   auto src = adaptor.getSrc();
-  auto res = ConverterUtils::getTransposedValue(src, op.getLoc(), rewriter,
-                                                op.getOrder());
+  Value res = tryPackedVectorTranspose(
+      src, cast<RankedTensorType>(op.getResult().getType()), op.getOrder(),
+      op.getLoc(), rewriter);
+  if (!res)
+    res = ConverterUtils::getTransposedValue(src, op.getLoc(), rewriter,
+                                           op.getOrder());
   rewriter.replaceOp(op, res);
   return success();
 }
@@ -1892,8 +1950,12 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   Value packed = rewriter.create<tensor::ConcatOp>(
       loc, packedType, 0, ValueRange{lhs, rhs});
   Value channels = reshape(packed, {2, count});
-  Value interleaved = ConverterUtils::getTransposedValue(
-      channels, loc, rewriter, {1, 0});
+  auto interleavedType = RankedTensorType::get({count, 2}, elemType);
+  Value interleaved = tryPackedVectorTranspose(
+      channels, interleavedType, {1, 0}, loc, rewriter);
+  if (!interleaved)
+    interleaved = ConverterUtils::getTransposedValue(
+        channels, loc, rewriter, {1, 0});
   rewriter.replaceOp(op, reshape(interleaved, resultType.getShape()));
   return success();
 }
