@@ -190,6 +190,37 @@ BitcastConverter::matchAndRewrite(triton::BitcastOp op, OpAdaptor adaptor,
   return success();
 }
 
+// Keep byte/word storage conversion opaque until physical strides are known.
+// CANN otherwise pushes a flat cast across reshape and reintroduces a broken
+// sub-block 2D cast. Values here undergo only permutation before narrowing.
+static Value castPermutationStorage(Value input, RankedTensorType type,
+                                    Location loc,
+                                    ConversionPatternRewriter &rewriter) {
+  auto srcType = cast<RankedTensorType>(input.getType());
+  bool extend = srcType.getElementType().isInteger(8) && type.getElementType().isInteger(16);
+  bool truncate = srcType.getElementType().isInteger(16) && type.getElementType().isInteger(8);
+  if (!extend && !truncate) {
+    if (srcType.getElementType().getIntOrFloatBitWidth() > type.getElementType().getIntOrFloatBitWidth())
+      return rewriter.create<arith::TruncIOp>(loc, type, input);
+    return rewriter.create<arith::ExtUIOp>(loc, type, input);
+  }
+  assert(srcType.getRank() == 1 && type.getRank() == 1);
+  Value empty = rewriter.create<bufferization::AllocTensorOp>(loc, type, ValueRange{});
+  auto tempType = RankedTensorType::get(type.getShape(), rewriter.getF16Type());
+  Value temp = rewriter.create<bufferization::AllocTensorOp>(loc, tempType, ValueRange{});
+  auto cast = rewriter.create<hivm::CustomOp>(
+      loc, TypeRange{type, tempType}, "flagtree.structured_storage_cast",
+      ValueRange{input}, ValueRange{empty, temp}, ValueRange{});
+  cast.setCoreType(hivm::TCoreType::VECTOR);
+  cast.setPipe(hivm::PIPE::PIPE_V);
+  cast.setVFMode(hivm::VFMode::SIMD);
+  cast->setAttr("symbol", rewriter.getStringAttr(extend ?
+      "custom_flagtree_byte_to_word" : "custom_flagtree_word_to_byte"));
+  cast->setAttr("max_rank", rewriter.getI64IntegerAttr(1));
+  cast->setAttr("no_side_effect", rewriter.getUnitAttr());
+  return cast->getResult(0);
+}
+
 // Small innermost axes otherwise become one padded UB row per few elements.
 // Express their static permutation as a single packed vector gather instead.
 // Bound the index buffer to 16 KiB so a large transpose retains native tiling.
@@ -226,18 +257,14 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
     auto wideFlatType = RankedTensorType::get({count}, rewriter.getI16Type());
     Value flatShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({count}));
     Value flat = rewriter.create<tensor::ReshapeOp>(loc, narrowFlatType, src, flatShape);
-    Value wide;
-    if (cast<IntegerType>(elemType).isUnsigned() || elemType.isInteger(1))
-      wide = rewriter.create<arith::ExtUIOp>(loc, wideFlatType, flat);
-    else
-      wide = rewriter.create<arith::ExtSIOp>(loc, wideFlatType, flat);
+    Value wide = castPermutationStorage(flat, wideFlatType, loc, rewriter);
     Value srcShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(srcType.getShape()));
     wide = rewriter.create<tensor::ReshapeOp>(loc, wideSrcType, wide, srcShape);
     Value permuted = tryPackedVectorTranspose(wide, wideResultType, order, loc, rewriter);
     if (!permuted)
       return {};
     Value wideFlat = rewriter.create<tensor::ReshapeOp>(loc, wideFlatType, permuted, flatShape);
-    Value narrowed = rewriter.create<arith::TruncIOp>(loc, narrowFlatType, wideFlat);
+    Value narrowed = castPermutationStorage(wideFlat, narrowFlatType, loc, rewriter);
     Value resultShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(resultType.getShape()));
     return rewriter.create<tensor::ReshapeOp>(loc, resultType, narrowed, resultShape);
   }
@@ -2018,9 +2045,7 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
     Value flatShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({count}));
     auto extend = [&](Value value) -> Value {
       value = rewriter.create<tensor::ReshapeOp>(loc, narrowType, value, flatShape);
-      if (cast<IntegerType>(elemType).isUnsigned() || elemType.isInteger(1))
-        return rewriter.create<arith::ExtUIOp>(loc, wideType, value);
-      return rewriter.create<arith::ExtSIOp>(loc, wideType, value);
+      return castPermutationStorage(value, wideType, loc, rewriter);
     };
     lhs = extend(lhs);
     rhs = extend(rhs);
@@ -2033,7 +2058,7 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
       auto wideFlatType = RankedTensorType::get({2 * count}, elemType);
       auto narrowFlatType = RankedTensorType::get({2 * count}, originalResultType.getElementType());
       value = rewriter.create<tensor::ReshapeOp>(loc, wideFlatType, value, flatShape);
-      value = rewriter.create<arith::TruncIOp>(loc, narrowFlatType, value);
+      value = castPermutationStorage(value, narrowFlatType, loc, rewriter);
       Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(originalResultType.getShape()));
       value = rewriter.create<tensor::ReshapeOp>(loc, originalResultType, value, shape);
     }
@@ -2284,10 +2309,7 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
       auto wideType = RankedTensorType::get({2 * count}, storageElement);
       Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({2 * count}));
       input = rewriter.create<tensor::ReshapeOp>(loc, narrowFlatType, input, shape);
-      if (cast<IntegerType>(element).isUnsigned() || element.isInteger(1))
-        input = rewriter.create<arith::ExtUIOp>(loc, wideType, input);
-      else
-        input = rewriter.create<arith::ExtSIOp>(loc, wideType, input);
+      input = castPermutationStorage(input, wideType, loc, rewriter);
     }
     auto reshape = [&](Value value, ArrayRef<int64_t> shape) -> Value {
       auto type = RankedTensorType::get(shape, storageElement);
@@ -2318,7 +2340,7 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
       Value result = split->getResult(channel);
       if (narrow) {
         auto narrowFlatType = RankedTensorType::get({count}, element);
-        result = rewriter.create<arith::TruncIOp>(loc, narrowFlatType, result);
+        result = castPermutationStorage(result, narrowFlatType, loc, rewriter);
         Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(outType.getShape()));
         result = rewriter.create<tensor::ReshapeOp>(loc, outType, result, shape);
       } else {

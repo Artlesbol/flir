@@ -74,10 +74,10 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 
 // Narrow casts must be flat: old CANN's sub-block 2D casts mishandle row strides.
 // CHECK-LABEL: func.func @narrow_split(
-// CHECK: arith.extsi {{.*}} : tensor<128xi8> to tensor<128xi16>
+// CHECK: symbol = "custom_flagtree_byte_to_word"
 // CHECK: symbol = "custom_flagtree_split_int16"
-// CHECK: arith.trunci {{.*}} : tensor<64xi16> to tensor<64xi8>
-// CHECK: arith.trunci {{.*}} : tensor<64xi16> to tensor<64xi8>
+// CHECK: symbol = "custom_flagtree_word_to_byte"
+// CHECK: symbol = "custom_flagtree_word_to_byte"
 // CHECK: return
 module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
   func.func @narrow_split(%x: tensor<8x8x2xi8>) -> (tensor<8x8xi8>, tensor<8x8xi8>) {
