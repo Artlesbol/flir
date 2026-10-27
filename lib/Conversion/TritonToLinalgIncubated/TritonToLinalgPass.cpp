@@ -88,6 +88,7 @@
 #include <cassert>
 #include <cstdint>
 #include <optional>
+#include "bishengir/Dialect/HACC/IR/HACC.h"
 
 #define DEBUG_TYPE "triton-to-linalg"
 
@@ -912,7 +913,9 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
     signalPassFailure();
     return;
   }
-  if (!compileOn91095Flag) {
+  auto permutationTarget = moduleOp->getAttrOfType<hacc::TargetAttr>("hacc.target");
+  if (!compileOn91095Flag && permutationTarget &&
+      permutationTarget.getTarget().getValue().starts_with("Ascend910B")) {
     RewritePatternSet splitPatterns(&getContext());
     splitPatterns.add<SplitBeforeTranspose>(&getContext());
     if (failed(applyPatternsGreedily(moduleOp, std::move(splitPatterns)))) {

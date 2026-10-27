@@ -49,6 +49,7 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Interfaces/CallInterfaces.h"
+#include "bishengir/Dialect/HACC/IR/HACC.h"
 #if __has_include("bishengir/Dialect/Annotation/IR/Annotation.h")
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #endif
@@ -190,6 +191,14 @@ BitcastConverter::matchAndRewrite(triton::BitcastOp op, OpAdaptor adaptor,
   return success();
 }
 
+static bool supportsStructuredPermutation(Operation *op) {
+  auto module = op->getParentOfType<ModuleOp>();
+  if (!module || compileOn91095Flag)
+    return false;
+  auto target = module->getAttrOfType<hacc::TargetAttr>("hacc.target");
+  return target && target.getTarget().getValue().starts_with("Ascend910B");
+}
+
 // Keep byte/word storage conversion opaque until physical strides are known.
 // CANN otherwise pushes a flat cast across reshape and reintroduces a broken
 // sub-block 2D cast. Values here undergo only permutation before narrowing.
@@ -232,7 +241,8 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
   auto srcType = dyn_cast<RankedTensorType>(src.getType());
   // The packaged primitive currently targets dav-c220. Keep the existing
   // lowering on the separately selected 910_95 architecture.
-  if (compileOn91095Flag || !srcType || !srcType.hasStaticShape() || srcType.getEncoding() ||
+  if (!supportsStructuredPermutation(src.getParentBlock()->getParentOp()) ||
+      !srcType || !srcType.hasStaticShape() || srcType.getEncoding() ||
       resultType.getEncoding() || order.empty())
     return {};
   SmallVector<int> sourceAxes, resultAxes;
@@ -2035,7 +2045,7 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   Value lhs = op.getLhs(), rhs = op.getRhs();
   auto inputType = cast<RankedTensorType>(lhs.getType());
   auto resultType = cast<RankedTensorType>(op.getResult().getType());
-  if (compileOn91095Flag || inputType.getEncoding() || resultType.getEncoding()) {
+  if (!supportsStructuredPermutation(op) || inputType.getEncoding() || resultType.getEncoding()) {
     Value empty = rewriter.create<tensor::EmptyOp>(
         loc, resultType.getShape(), resultType.getElementType());
     auto sizes = llvm::map_to_vector(inputType.getShape(), [&](int64_t size) {
@@ -2328,7 +2338,7 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
   bool narrow = element.isInteger(8) || element.isInteger(1);
   bool word = element.isF16() || element.isBF16() || element.isF32() ||
               element.isInteger(16) || element.isInteger(32);
-  if (!compileOn91095Flag && (word || narrow) && !inputType.getEncoding() && !outType.getEncoding() &&
+  if (supportsStructuredPermutation(op) && (word || narrow) && !inputType.getEncoding() && !outType.getEncoding() &&
       (narrow || !canFoldSplitIntoDenseLoad(input))) {
     int64_t count = outType.getNumElements();
     Type storageElement = narrow ? rewriter.getI16Type() : element;
