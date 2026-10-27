@@ -202,6 +202,19 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
   if (!srcType || !srcType.hasStaticShape() || srcType.getEncoding() ||
       resultType.getEncoding() || order.empty())
     return {};
+  SmallVector<int> sourceAxes, resultAxes;
+  for (int i = 0; i < srcType.getRank(); ++i)
+    if (srcType.getDimSize(i) != 1)
+      sourceAxes.push_back(i);
+  for (int axis : order)
+    if (srcType.getDimSize(axis) != 1)
+      resultAxes.push_back(axis);
+  if (sourceAxes == resultAxes) {
+    // Permuting only unit axes preserves flattened element order exactly.
+    Value shape = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64TensorAttr(resultType.getShape()));
+    return rewriter.create<tensor::ReshapeOp>(loc, resultType, src, shape);
+  }
   auto elemType = srcType.getElementType();
   if (!elemType.isIntOrFloat() ||
       (elemType.getIntOrFloatBitWidth() != 16 &&
