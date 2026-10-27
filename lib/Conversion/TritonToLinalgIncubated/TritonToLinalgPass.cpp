@@ -812,10 +812,112 @@ TritonToLinalgIncubatedPass::processLegalStrideOperations(ModuleOp moduleOp) {
   return success();
 }
 
+namespace {
+// Resolve exact inverse pairs before either operation acquires a physical UB
+// layout. Other users of the split results remain valid and are not modified.
+struct FoldJoinOfSplit : OpRewritePattern<triton::JoinOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(triton::JoinOp op,
+                                PatternRewriter &rewriter) const override {
+    auto split = op.getLhs().getDefiningOp<triton::SplitOp>();
+    if (!split || op.getLhs() != split.getOutLHS() ||
+        op.getRhs() != split.getOutRHS() ||
+        op.getType() != split.getSrc().getType())
+      return failure();
+    rewriter.replaceOp(op, split.getSrc());
+    return success();
+  }
+};
+
+// Move channel selection before a transpose. The optional reshape may only
+// factor the last axis; it must preserve the other axes and element order.
+// This is a shape identity, independent of dtype, tile length, or consumers.
+// It avoids manufacturing an aligned UB buffer for each scalar channel.
+struct SplitBeforeTranspose : OpRewritePattern<triton::SplitOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(triton::SplitOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input = op.getSrc();
+    auto inputType = cast<RankedTensorType>(input.getType());
+    if (!inputType.hasStaticShape() || inputType.getEncoding())
+      return failure();
+    Value transposed = input;
+    if (auto reshape = input.getDefiningOp<triton::ReshapeOp>()) {
+      // allow_reorder changes which logical element a reshape denotes.
+      if (reshape.getAllowReorder())
+        return failure();
+      transposed = reshape.getSrc();
+    }
+    auto trans = transposed.getDefiningOp<triton::TransOp>();
+    if (!trans)
+      return failure();
+    auto transType = cast<RankedTensorType>(transposed.getType());
+    auto baseType = cast<RankedTensorType>(trans.getSrc().getType());
+    int64_t rank = transType.getRank();
+    if (!rank || !transType.hasStaticShape() || transType.getEncoding() ||
+        baseType.getEncoding() || inputType.getRank() < rank)
+      return failure();
+    for (int64_t i = 0; i < rank - 1; ++i)
+      if (inputType.getDimSize(i) != transType.getDimSize(i))
+        return failure();
+    int64_t tail = 1;
+    for (int64_t i = rank - 1; i < inputType.getRank(); ++i)
+      tail *= inputType.getDimSize(i);
+    if (tail != transType.getDimSize(rank - 1) || tail % 2)
+      return failure();
+
+    // Keep the selected axis (possibly size one), transpose it, and reshape
+    // away the split axis. Later canonicalization can compose nested slices.
+    auto order = trans.getOrder();
+    int64_t axis = order.back();
+    SmallVector<int64_t> sliceShape(baseType.getShape());
+    sliceShape[axis] /= 2;
+    auto sliceType = RankedTensorType::get(sliceShape, baseType.getElementType());
+    SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> sizes, strides(rank, rewriter.getIndexAttr(1));
+    for (auto n : sliceShape)
+      sizes.push_back(rewriter.getIndexAttr(n));
+    strides[axis] = rewriter.getIndexAttr(2);
+    SmallVector<int64_t> selectedShape(transType.getShape());
+    selectedShape.back() /= 2;
+    auto selectedType = RankedTensorType::get(selectedShape, baseType.getElementType());
+    auto resultType = cast<RankedTensorType>(op.getOutLHS().getType());
+    SmallVector<Value> results;
+    for (int channel = 0; channel < 2; ++channel) {
+      offsets[axis] = rewriter.getIndexAttr(channel);
+      Value slice = rewriter.create<tensor::ExtractSliceOp>(
+          op.getLoc(), sliceType, trans.getSrc(), offsets, sizes, strides);
+      Value selected = rewriter.create<triton::TransOp>(
+          op.getLoc(), selectedType, slice, order);
+      if (selectedType != resultType)
+        selected = rewriter.create<triton::ReshapeOp>(
+            op.getLoc(), resultType, selected, false);
+      results.push_back(selected);
+    }
+    rewriter.replaceOp(op, results);
+    return success();
+  }
+};
+} // namespace
+
 void TritonToLinalgIncubatedPass::runOnOperation() {
   compileOn91095Flag = this->compileOn91095;
 
   auto moduleOp = getOperation();
+
+  // Inverse pairs must fold before split is rewritten to channel slices.
+  RewritePatternSet inversePatterns(&getContext());
+  inversePatterns.add<FoldJoinOfSplit>(&getContext());
+  if (failed(applyPatternsGreedily(moduleOp, std::move(inversePatterns)))) {
+    signalPassFailure();
+    return;
+  }
+  RewritePatternSet splitPatterns(&getContext());
+  splitPatterns.add<SplitBeforeTranspose>(&getContext());
+  if (failed(applyPatternsGreedily(moduleOp, std::move(splitPatterns)))) {
+    signalPassFailure();
+    return;
+  }
 
   // Check if the kernel contains tl.dot. Without tl.dot,
   // the kernel would be pure AIV kernel.
