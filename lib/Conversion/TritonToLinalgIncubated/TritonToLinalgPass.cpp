@@ -935,6 +935,78 @@ struct SplitBeforeTranspose : OpRewritePattern<triton::SplitOp> {
 };
 } // namespace
 
+// Prove the original load/store graph before dialect conversion creates
+// replacement users. ConversionPatternRewriter defers replacing old uses, so
+// use counts on a partially converted graph cannot prove this fast path.
+static bool isDensePermutationOffsets(Value value) {
+  if (value.getDefiningOp<triton::MakeRangeOp>())
+    return true;
+  if (auto add = value.getDefiningOp<arith::AddIOp>())
+    return (isDensePermutationOffsets(add.getLhs()) &&
+            add.getRhs().getDefiningOp<triton::SplatOp>()) ||
+           (isDensePermutationOffsets(add.getRhs()) &&
+            add.getLhs().getDefiningOp<triton::SplatOp>());
+  return false;
+}
+
+static bool isDensePermutationPointer(Value value) {
+  auto add = value.getDefiningOp<triton::AddPtrOp>();
+  return add && add.getPtr().getDefiningOp<triton::SplatOp>() &&
+         isDensePermutationOffsets(add.getOffset());
+}
+
+static bool isSingleUsePermutationLoad(Value value) {
+  while (value.hasOneUse()) {
+    if (auto reshape = value.getDefiningOp<triton::ReshapeOp>()) {
+      if (reshape.getAllowReorder())
+        return false;
+      value = reshape.getSrc();
+      continue;
+    }
+    auto load = value.getDefiningOp<triton::LoadOp>();
+    return load && !load.getMask() && load.getBoundaryCheck().empty() &&
+           isDensePermutationPointer(load.getPtr());
+  }
+  return false;
+}
+
+static bool isSingleUsePermutationStore(Value value) {
+  while (value.hasOneUse()) {
+    Operation *user = *value.getUsers().begin();
+    if (auto reshape = dyn_cast<triton::ReshapeOp>(user)) {
+      if (reshape.getAllowReorder())
+        return false;
+      value = reshape.getResult();
+      continue;
+    }
+    auto store = dyn_cast<triton::StoreOp>(user);
+    return store && store.getValue() == value && !store.getMask() &&
+           store.getBoundaryCheck().empty() &&
+           isDensePermutationPointer(store.getPtr());
+  }
+  return false;
+}
+
+static void markDenseNativePermutations(ModuleOp module) {
+  module.walk([&](Operation *op) {
+    if (!isa<triton::SplitOp, triton::JoinOp>(op))
+      return;
+    op->removeAttr("flagtree.dense_native_permutation");
+    bool dense = false;
+    if (auto split = dyn_cast<triton::SplitOp>(op))
+      dense = isSingleUsePermutationLoad(split.getSrc()) &&
+              isSingleUsePermutationStore(split.getOutLHS()) &&
+              isSingleUsePermutationStore(split.getOutRHS());
+    else if (auto join = dyn_cast<triton::JoinOp>(op))
+      dense = isSingleUsePermutationLoad(join.getLhs()) &&
+              isSingleUsePermutationLoad(join.getRhs()) &&
+              isSingleUsePermutationStore(join.getResult());
+    if (dense)
+      op->setAttr("flagtree.dense_native_permutation",
+                  UnitAttr::get(module.getContext()));
+  });
+}
+
 void TritonToLinalgIncubatedPass::runOnOperation() {
   compileOn91095Flag = this->compileOn91095;
 
@@ -962,6 +1034,8 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
       return;
     }
   }
+
+  markDenseNativePermutations(moduleOp);
 
   // Check if the kernel contains tl.dot. Without tl.dot,
   // the kernel would be pure AIV kernel.
