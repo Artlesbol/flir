@@ -2179,10 +2179,14 @@ static bool canFoldSplitIntoDenseLoad(Value value) {
   if (!copy)
     return false;
   auto type = cast<MemRefType>(copy.getSource().getType());
-  SmallVector<int64_t> strides;
-  int64_t offset;
-  if (!type.hasStaticShape() || failed(type.getStridesAndOffset(strides, offset)))
+  if (!type.hasStaticShape() ||
+      (!type.getLayout().isIdentity() && !isa<StridedLayoutAttr>(type.getLayout())))
     return false;
+#ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+  auto [strides, offset] = type.getStridesAndOffset();
+#else
+  auto [strides, offset] = getStridesAndOffset(type);
+#endif
   int64_t expected = 1;
   for (int dim = type.getRank() - 1; dim >= 0; --dim) {
     if (type.getDimSize(dim) != 1 && strides[dim] != expected)
