@@ -2054,13 +2054,11 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
       originalElement.isInteger(16) || originalElement.isInteger(32);
   auto module = op->getParentOfType<ModuleOp>();
   auto policy = module->getAttrOfType<StringAttr>("flagtree.structured_join_lowering");
-  auto persistent = module->getAttrOfType<BoolAttr>("flagtree.auto_blockify");
   StringRef lowering = policy ? policy.getValue() : "auto";
-  // Native load/store folding is cheap for one logical row per block. In a
-  // persistent loop the compact vector interleave avoids repeated strided
-  // transfers. Explicit policies keep the same semantic/layout admission.
-  bool preferNative = lowering == "native" ||
-      (lowering == "auto" && (!persistent || !persistent.getValue()));
+  // Within the compact index budget, packed interleave avoids strided
+  // transfers in both per-row and persistent dispatch. Keep native as an
+  // explicit A/B policy; it still requires the original dense graph proof.
+  bool preferNative = lowering == "native";
   bool denseNative = preferNative && supportsStructuredPermutation(op) && supportedElement &&
       !originalElement.isInteger(8) && inputType.hasStaticShape() &&
       !inputType.getEncoding() && !resultType.getEncoding() && inputType.getRank() == 1 &&
