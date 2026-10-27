@@ -199,6 +199,11 @@ static bool supportsStructuredPermutation(Operation *op) {
   return target && target.getTarget().getValue().starts_with("Ascend910B");
 }
 
+static bool hasSingleUseDenseLoad(Value value,
+                                  ConversionPatternRewriter &rewriter);
+static bool hasContiguousTerminalStore(Value value,
+                                       ConversionPatternRewriter &rewriter);
+
 // Keep byte/word storage conversion opaque until physical strides are known.
 // CANN otherwise pushes a flat cast across reshape and reintroduces a broken
 // sub-block 2D cast. Values here undergo only permutation before narrowing.
@@ -2049,12 +2054,27 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   bool supportedElement = originalElement.isF16() || originalElement.isBF16() ||
       originalElement.isF32() || originalElement.isInteger(8) ||
       originalElement.isInteger(16) || originalElement.isInteger(32);
+  bool denseNative = supportsStructuredPermutation(op) && supportedElement &&
+      !originalElement.isInteger(8) && inputType.hasStaticShape() &&
+      !inputType.getEncoding() && !resultType.getEncoding() && inputType.getRank() == 1 &&
+      inputType.getNumElements() * originalElement.getIntOrFloatBitWidth() >= 256 &&
+      hasSingleUseDenseLoad(lhs, rewriter) && hasSingleUseDenseLoad(rhs, rewriter) &&
+      hasContiguousTerminalStore(op.getResult(), rewriter);
   // Admit the complete packed algorithm only within its index-buffer budget.
   // In particular, do not widen a large byte join and then send it to a padded
   // native transpose: that consumes far more UB than the existing interleave.
   if (!supportsStructuredPermutation(op) || !supportedElement ||
       !inputType.hasStaticShape() || inputType.getNumElements() > 2048 ||
-      inputType.getEncoding() || resultType.getEncoding()) {
+      inputType.getEncoding() || resultType.getEncoding() || denseNative) {
+    auto storedType = resultType;
+    bool rawBits = denseNative && isa<FloatType>(originalElement);
+    if (rawBits) {
+      Type bits = rewriter.getIntegerType(originalElement.getIntOrFloatBitWidth());
+      auto bitsInput = RankedTensorType::get(inputType.getShape(), bits);
+      lhs = rewriter.create<arith::BitcastOp>(loc, bitsInput, lhs);
+      rhs = rewriter.create<arith::BitcastOp>(loc, bitsInput, rhs);
+      resultType = RankedTensorType::get(resultType.getShape(), bits);
+    }
     Value empty = rewriter.create<tensor::EmptyOp>(
         loc, resultType.getShape(), resultType.getElementType());
     auto sizes = llvm::map_to_vector(inputType.getShape(), [&](int64_t size) {
@@ -2067,6 +2087,8 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
     Value first = rewriter.create<tensor::InsertSliceOp>(loc, lhs, empty, offsets, sizes, strides);
     offsets.back() = rewriter.getIndexAttr(1);
     Value second = rewriter.create<tensor::InsertSliceOp>(loc, rhs, first, offsets, sizes, strides);
+    if (rawBits)
+      second = rewriter.create<arith::BitcastOp>(loc, storedType, second);
     rewriter.replaceOp(op, second);
     return success();
   }
@@ -2269,8 +2291,15 @@ GatherConverter::matchAndRewrite(triton::GatherOp op, OpAdaptor adaptor,
 // Preserve CANN's load-folding fast path only for a single-use reshape chain
 // from a dense memory copy. Computed values and extra consumers do not prove
 // that the later UB layout will remain dense.
-static bool canFoldSplitIntoDenseLoad(Value value) {
+static bool hasSingleUseDenseLoad(Value value,
+                                  ConversionPatternRewriter &rewriter) {
   while (value.hasOneUse()) {
+    if (auto reshape = value.getDefiningOp<triton::ReshapeOp>()) {
+      if (reshape.getAllowReorder())
+        return false;
+      value = reshape.getSrc();
+      continue;
+    }
     if (auto reshape = value.getDefiningOp<tensor::ReshapeOp>()) {
       value = reshape.getSource();
       continue;
@@ -2287,11 +2316,17 @@ static bool canFoldSplitIntoDenseLoad(Value value) {
   }
   if (!value.hasOneUse())
     return false;
+  // Dialect conversion defers replacing original uses. Count consumers on
+  // the logical chain, then inspect its remapped load implementation.
+  value = rewriter.getRemappedValue(value);
+  if (!value)
+    return false;
   auto tensor = value.getDefiningOp<bufferization::ToTensorOp>();
   if (!tensor)
     return false;
   Value buffer = tensor->getOperand(0);
-  if (!buffer.getDefiningOp<memref::AllocOp>())
+  if (!buffer.getDefiningOp<memref::AllocOp>() ||
+      cast<MemRefType>(buffer.getType()).getRank() != 1)
     return false;
   memref::CopyOp copy;
   for (Operation *user : buffer.getUsers()) {
@@ -2322,6 +2357,49 @@ static bool canFoldSplitIntoDenseLoad(Value value) {
   return true;
 }
 
+static bool isUnitStepOffsets(Value value) {
+  if (value.getDefiningOp<triton::MakeRangeOp>())
+    return true;
+  if (auto add = value.getDefiningOp<arith::AddIOp>())
+    return (isUnitStepOffsets(add.getLhs()) && add.getRhs().getDefiningOp<triton::SplatOp>()) ||
+           (isUnitStepOffsets(add.getRhs()) && add.getLhs().getDefiningOp<triton::SplatOp>());
+  return false;
+}
+
+static bool hasContiguousTerminalStore(Value value,
+                                       ConversionPatternRewriter &rewriter) {
+  while (value.hasOneUse()) {
+    Operation *user = *value.getUsers().begin();
+    if (auto reshape = dyn_cast<triton::ReshapeOp>(user)) {
+      if (reshape.getAllowReorder())
+        return false;
+      value = reshape.getResult();
+      continue;
+    }
+    auto store = dyn_cast<triton::StoreOp>(user);
+    if (!store || store.getValue() != value || store.getMask() ||
+        !store.getBoundaryCheck().empty())
+      return false;
+    Value ptr = store.getPtr();
+    Value mapped = rewriter.getRemappedValue(ptr);
+    if (mapped && mapped.getDefiningOp<memref::ReinterpretCastOp>()) {
+      auto type = cast<MemRefType>(mapped.getType());
+      if (type.getRank() != 1 || !type.hasStaticShape())
+        return false;
+#ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+      auto [strides, offset] = type.getStridesAndOffset();
+#else
+      auto [strides, offset] = getStridesAndOffset(type);
+#endif
+      return strides[0] == 1;
+    }
+    auto add = ptr.getDefiningOp<triton::AddPtrOp>();
+    return add && add.getPtr().getDefiningOp<triton::SplatOp>() &&
+           isUnitStepOffsets(add.getOffset());
+  }
+  return false;
+}
+
 LogicalResult
 SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
@@ -2347,8 +2425,12 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
   bool narrow = element.isInteger(8) || element.isInteger(1);
   bool word = element.isF16() || element.isBF16() || element.isF32() ||
               element.isInteger(16) || element.isInteger(32);
+  bool denseLoad = word && inputType.getRank() == 2 &&
+      hasSingleUseDenseLoad(input, rewriter) &&
+      hasContiguousTerminalStore(op.getOutLHS(), rewriter) &&
+      hasContiguousTerminalStore(op.getOutRHS(), rewriter);
   if (supportsStructuredPermutation(op) && (word || narrow) && !inputType.getEncoding() && !outType.getEncoding() &&
-      (narrow || !canFoldSplitIntoDenseLoad(input))) {
+      (narrow || !denseLoad)) {
     int64_t count = outType.getNumElements();
     Type storageElement = narrow ? rewriter.getI16Type() : element;
     if (narrow) {
