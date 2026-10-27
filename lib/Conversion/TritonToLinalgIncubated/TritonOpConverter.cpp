@@ -278,14 +278,12 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
   // its custom-op boundary also prevents unrelated operand stride alignment.
   Value addresses = rewriter.create<bufferization::AllocTensorOp>(
       loc, indexType, ValueRange{});
-  Value scratch = rewriter.create<bufferization::AllocTensorOp>(
-      loc, flatType, ValueRange{});
   StringRef suffix = elemType.isF16() ? "half" : elemType.isBF16() ? "bf16" :
                      elemType.isF32() ? "float" :
                      elemType.isInteger(16) ? "int16" : "int32";
   auto gather = rewriter.create<hivm::CustomOp>(
-      loc, TypeRange{flatType, indexType, flatType}, "flagtree.structured_gather",
-      ValueRange{flat, index}, ValueRange{empty, addresses, scratch}, ValueRange{});
+      loc, TypeRange{flatType, indexType}, "flagtree.structured_gather",
+      ValueRange{flat, index}, ValueRange{empty, addresses}, ValueRange{});
   gather.setCoreType(hivm::TCoreType::VECTOR);
   gather.setPipe(hivm::PIPE::PIPE_V);
   gather.setVFMode(hivm::VFMode::SIMD);
