@@ -2217,7 +2217,8 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
   bool narrow = element.isInteger(8) || element.isInteger(1);
   bool word = element.isF16() || element.isBF16() || element.isF32() ||
               element.isInteger(16) || element.isInteger(32);
-  if ((word || narrow) && !canFoldSplitIntoDenseLoad(input)) {
+  if ((word || narrow) && !inputType.getEncoding() && !outType.getEncoding() &&
+      !canFoldSplitIntoDenseLoad(input)) {
     int64_t count = outType.getNumElements();
     Type storageElement = narrow ? rewriter.getI16Type() : element;
     if (narrow) {
