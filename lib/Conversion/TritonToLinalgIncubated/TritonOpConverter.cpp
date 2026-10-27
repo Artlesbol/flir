@@ -2140,12 +2140,127 @@ GatherConverter::matchAndRewrite(triton::GatherOp op, OpAdaptor adaptor,
   return success();
 }
 
+// Preserve CANN's load-folding fast path only for a single-use reshape chain
+// from a dense memory copy. Computed values and extra consumers do not prove
+// that the later UB layout will remain dense.
+static bool canFoldSplitIntoDenseLoad(Value value) {
+  while (value.hasOneUse()) {
+    if (auto reshape = value.getDefiningOp<tensor::ReshapeOp>()) {
+      value = reshape.getSource();
+      continue;
+    }
+    if (auto expand = value.getDefiningOp<tensor::ExpandShapeOp>()) {
+      value = expand.getSrc();
+      continue;
+    }
+    if (auto collapse = value.getDefiningOp<tensor::CollapseShapeOp>()) {
+      value = collapse.getSrc();
+      continue;
+    }
+    break;
+  }
+  if (!value.hasOneUse())
+    return false;
+  auto tensor = value.getDefiningOp<bufferization::ToTensorOp>();
+  if (!tensor)
+    return false;
+  Value buffer = tensor.getMemref();
+  if (!buffer.getDefiningOp<memref::AllocOp>())
+    return false;
+  memref::CopyOp copy;
+  for (Operation *user : buffer.getUsers()) {
+    if (user == tensor.getOperation() || isa<memref::DeallocOp>(user))
+      continue;
+    auto candidate = dyn_cast<memref::CopyOp>(user);
+    if (!candidate || candidate.getTarget() != buffer || copy)
+      return false;
+    copy = candidate;
+  }
+  if (!copy)
+    return false;
+  auto type = cast<MemRefType>(copy.getSource().getType());
+  SmallVector<int64_t> strides;
+  int64_t offset;
+  if (!type.hasStaticShape() || failed(getStridesAndOffset(type, strides, offset)))
+    return false;
+  int64_t expected = 1;
+  for (int dim = type.getRank() - 1; dim >= 0; --dim) {
+    if (type.getDimSize(dim) != 1 && strides[dim] != expected)
+      return false;
+    expected *= type.getDimSize(dim);
+  }
+  return true;
+}
+
 LogicalResult
 SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
                                 ConversionPatternRewriter &rewriter) const {
   Value input = op.getSrc();
   auto loc = op.getLoc();
   auto inputType = cast<RankedTensorType>(input.getType());
+  auto outType = cast<RankedTensorType>(op.getOutLHS().getType());
+  if (auto constant = input.getDefiningOp<arith::ConstantOp>()) {
+    if (auto dense = dyn_cast<DenseElementsAttr>(constant.getValue())) {
+      SmallVector<Attribute> channels[2];
+      int64_t i = 0;
+      for (Attribute value : dense.getValues<Attribute>())
+        channels[i++ % 2].push_back(value);
+      SmallVector<Value> results;
+      for (auto &channel : channels)
+        results.push_back(rewriter.create<arith::ConstantOp>(
+            loc, DenseElementsAttr::get(outType, ArrayRef<Attribute>(channel))));
+      rewriter.replaceOp(op, results);
+      return success();
+    }
+  }
+  Type element = inputType.getElementType();
+  bool narrow = element.isInteger(8) || element.isInteger(1);
+  bool word = element.isF16() || element.isBF16() || element.isF32() ||
+              element.isInteger(16) || element.isInteger(32);
+  if ((word || narrow) && !canFoldSplitIntoDenseLoad(input)) {
+    int64_t count = outType.getNumElements();
+    Type storageElement = narrow ? rewriter.getI16Type() : element;
+    if (narrow) {
+      auto wideType = RankedTensorType::get(inputType.getShape(), storageElement);
+      if (cast<IntegerType>(element).isUnsigned() || element.isInteger(1))
+        input = rewriter.create<arith::ExtUIOp>(loc, wideType, input);
+      else
+        input = rewriter.create<arith::ExtSIOp>(loc, wideType, input);
+    }
+    auto reshape = [&](Value value, ArrayRef<int64_t> shape) -> Value {
+      auto type = RankedTensorType::get(shape, storageElement);
+      if (value.getType() == type)
+        return value;
+      Value sizes = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(shape));
+      return rewriter.create<tensor::ReshapeOp>(loc, type, value, sizes);
+    };
+    Value flat = reshape(input, {2 * count});
+    auto flatType = RankedTensorType::get({count}, storageElement);
+    auto indexType = RankedTensorType::get({count}, rewriter.getI32Type());
+    Value lhs = rewriter.create<tensor::EmptyOp>(loc, flatType.getShape(), storageElement);
+    Value rhs = rewriter.create<tensor::EmptyOp>(loc, flatType.getShape(), storageElement);
+    Value addresses = rewriter.create<bufferization::AllocTensorOp>(loc, indexType, ValueRange{});
+    StringRef suffix = storageElement.isF16() ? "half" : storageElement.isBF16() ? "bf16" :
+                       storageElement.isF32() ? "float" : storageElement.isInteger(16) ? "int16" : "int32";
+    auto split = rewriter.create<hivm::CustomOp>(
+        loc, TypeRange{flatType, flatType, indexType}, "flagtree.structured_split",
+        ValueRange{flat}, ValueRange{lhs, rhs, addresses}, ValueRange{});
+    split.setCoreType(hivm::TCoreType::VECTOR);
+    split.setPipe(hivm::PIPE::PIPE_V);
+    split.setVFMode(hivm::VFMode::SIMD);
+    split->setAttr("symbol", rewriter.getStringAttr(("custom_flagtree_split_" + suffix).str()));
+    split->setAttr("max_rank", rewriter.getI64IntegerAttr(1));
+    split->setAttr("no_side_effect", rewriter.getUnitAttr());
+    SmallVector<Value> results;
+    for (int channel = 0; channel < 2; ++channel) {
+      Value result = reshape(split->getResult(channel), outType.getShape());
+      if (narrow)
+        result = rewriter.create<arith::TruncIOp>(loc, outType, result);
+      results.push_back(result);
+    }
+    rewriter.replaceOp(op, results);
+    return success();
+  }
 
   int64_t rank = inputType.getRank();
   SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
@@ -2153,7 +2268,6 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
   SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
   strides.back() = rewriter.getIndexAttr(2);
 
-  auto outType = dyn_cast<RankedTensorType>(op.getOutLHS().getType());
   auto sizes = llvm::map_to_vector(outType.getShape(), [&](int64_t t) {
     return OpFoldResult(rewriter.getIndexAttr(t));
   });
