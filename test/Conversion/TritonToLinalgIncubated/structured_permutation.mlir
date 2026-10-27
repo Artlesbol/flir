@@ -89,3 +89,29 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
     return %a, %b : tensor<8x8xi8>, tensor<8x8xi8>
   }
 }
+
+// -----
+
+// Unit extent makes the stride irrelevant; the base address/offset must stay.
+// CHECK-LABEL: func.func @unit_copy(
+// CHECK: memref.reinterpret_cast {{.*}} to offset: [0], sizes: [1], strides: [1]
+// CHECK: memref.copy {{.*}} : memref<1xi8> to memref<1xi8>
+module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+  func.func @unit_copy(%src: memref<1xi8, strided<[3]>>, %dst: memref<1xi8>) {
+    memref.copy %src, %dst : memref<1xi8, strided<[3]>> to memref<1xi8>
+    return
+  }
+}
+
+// -----
+
+// A nonzero descriptor offset cannot be reset by this rewrite.
+// CHECK-LABEL: func.func @unit_copy_offset(
+// CHECK-NOT: memref.reinterpret_cast
+// CHECK: memref.copy {{.*}} : memref<1xi8, strided<[3], offset: 2>> to memref<1xi8>
+module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+  func.func @unit_copy_offset(%src: memref<1xi8, strided<[3], offset: 2>>, %dst: memref<1xi8>) {
+    memref.copy %src, %dst : memref<1xi8, strided<[3], offset: 2>> to memref<1xi8>
+    return
+  }
+}

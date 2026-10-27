@@ -814,6 +814,40 @@ TritonToLinalgIncubatedPass::processLegalStrideOperations(ModuleOp moduleOp) {
 }
 
 namespace {
+// A one-element view's stride has no effect on its address. CANN's strided
+// byte-copy path mishandles this degenerate case. Normalize only zero-offset
+// rank-one views: reinterpret_cast replaces rather than adds the old offset.
+struct NormalizeUnitCopyStride : OpRewritePattern<memref::CopyOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(memref::CopyOp op,
+                                PatternRewriter &rewriter) const override {
+    auto normalize = [&](Value value) -> Value {
+      auto type = dyn_cast<MemRefType>(value.getType());
+      if (!type || type.getRank() != 1 || type.getDimSize(0) != 1 ||
+          (!type.getLayout().isIdentity() && !isa<StridedLayoutAttr>(type.getLayout())))
+        return value;
+#ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
+      auto [strides, offset] = type.getStridesAndOffset();
+#else
+      auto [strides, offset] = getStridesAndOffset(type);
+#endif
+      if (offset != 0 || strides[0] == 1)
+        return value;
+      auto normalizedType = MemRefType::get(
+          {1}, type.getElementType(), MemRefLayoutAttrInterface{}, type.getMemorySpace());
+      SmallVector<OpFoldResult> ones{rewriter.getIndexAttr(1)};
+      return rewriter.create<memref::ReinterpretCastOp>(
+          op.getLoc(), normalizedType, value, rewriter.getIndexAttr(0), ones, ones);
+    };
+    Value source = normalize(op.getSource());
+    Value target = normalize(op.getTarget());
+    if (source == op.getSource() && target == op.getTarget())
+      return failure();
+    rewriter.replaceOpWithNewOp<memref::CopyOp>(op, source, target);
+    return success();
+  }
+};
+
 // Resolve exact inverse pairs before either operation acquires a physical UB
 // layout. Other users of the split results remain valid and are not modified.
 struct FoldJoinOfSplit : OpRewritePattern<triton::JoinOp> {
@@ -1304,6 +1338,18 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
     func->setAttr("WorkspaceArgIdx",
                   IntegerAttr::get(IntegerType::get(&getContext(), 64),
                                    1)); // 64: 64位整型
+  }
+
+  // Normalize copies created during load/store conversion, after the partial
+  // conversion has completed and before CANN chooses a strided DMA template.
+  if (!compileOn91095Flag && permutationTarget &&
+      permutationTarget.getTarget().getValue().starts_with("Ascend910B")) {
+    RewritePatternSet copyPatterns(&getContext());
+    copyPatterns.add<NormalizeUnitCopyStride>(&getContext());
+    if (failed(applyPatternsGreedily(moduleOp, std::move(copyPatterns), permutationConfig))) {
+      signalPassFailure();
+      return;
+    }
   }
 
   // Fix the Location info
