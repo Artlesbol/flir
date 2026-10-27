@@ -2045,7 +2045,16 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   Value lhs = op.getLhs(), rhs = op.getRhs();
   auto inputType = cast<RankedTensorType>(lhs.getType());
   auto resultType = cast<RankedTensorType>(op.getResult().getType());
-  if (!supportsStructuredPermutation(op) || inputType.getEncoding() || resultType.getEncoding()) {
+  Type originalElement = inputType.getElementType();
+  bool supportedElement = originalElement.isF16() || originalElement.isBF16() ||
+      originalElement.isF32() || originalElement.isInteger(8) ||
+      originalElement.isInteger(16) || originalElement.isInteger(32);
+  // Admit the complete packed algorithm only within its index-buffer budget.
+  // In particular, do not widen a large byte join and then send it to a padded
+  // native transpose: that consumes far more UB than the existing interleave.
+  if (!supportsStructuredPermutation(op) || !supportedElement ||
+      !inputType.hasStaticShape() || inputType.getNumElements() > 2048 ||
+      inputType.getEncoding() || resultType.getEncoding()) {
     Value empty = rewriter.create<tensor::EmptyOp>(
         loc, resultType.getShape(), resultType.getElementType());
     auto sizes = llvm::map_to_vector(inputType.getShape(), [&](int64_t size) {

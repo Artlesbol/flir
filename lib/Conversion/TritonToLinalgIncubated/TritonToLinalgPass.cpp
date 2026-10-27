@@ -907,9 +907,14 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
   auto moduleOp = getOperation();
 
   // Inverse pairs must fold before split is rewritten to channel slices.
+  // These are targeted semantic rewrites, not an extra canonicalization pass
+  // over unrelated pointer arithmetic, masks, or control flow.
+  GreedyRewriteConfig permutationConfig;
+  permutationConfig.enableFolding(false).setRegionSimplificationLevel(
+      GreedySimplifyRegionLevel::Disabled);
   RewritePatternSet inversePatterns(&getContext());
   inversePatterns.add<FoldJoinOfSplit>(&getContext());
-  if (failed(applyPatternsGreedily(moduleOp, std::move(inversePatterns)))) {
+  if (failed(applyPatternsGreedily(moduleOp, std::move(inversePatterns), permutationConfig))) {
     signalPassFailure();
     return;
   }
@@ -918,7 +923,7 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
       permutationTarget.getTarget().getValue().starts_with("Ascend910B")) {
     RewritePatternSet splitPatterns(&getContext());
     splitPatterns.add<SplitBeforeTranspose>(&getContext());
-    if (failed(applyPatternsGreedily(moduleOp, std::move(splitPatterns)))) {
+    if (failed(applyPatternsGreedily(moduleOp, std::move(splitPatterns), permutationConfig))) {
       signalPassFailure();
       return;
     }
