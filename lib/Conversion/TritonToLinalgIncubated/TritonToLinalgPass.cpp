@@ -891,7 +891,7 @@ struct SplitBeforeTranspose : OpRewritePattern<triton::SplitOp> {
           op.getLoc(), selectedType, slice, order);
       if (selectedType != resultType)
         selected = rewriter.create<triton::ReshapeOp>(
-            op.getLoc(), resultType, selected, false);
+            op.getLoc(), resultType.getShape(), selected, false);
       results.push_back(selected);
     }
     rewriter.replaceOp(op, results);
