@@ -259,7 +259,26 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
     return rewriter.create<tensor::ReshapeOp>(loc, resultType, src, shape);
   }
   auto elemType = srcType.getElementType();
-  if (elemType.isInteger(8) || elemType.isInteger(1)) {
+  bool narrow = elemType.isInteger(8) || elemType.isInteger(1);
+  if (!narrow && (!elemType.isIntOrFloat() ||
+      (elemType.getIntOrFloatBitWidth() != 16 &&
+       elemType.getIntOrFloatBitWidth() != 32)))
+    return {};
+  int64_t count = srcType.getNumElements();
+  int64_t storageBits = narrow ? 16 : elemType.getIntOrFloatBitWidth();
+  int64_t blockElements = 32 / (storageBits / 8);
+  if (count < blockElements || count > 4096 ||
+      order.back() == srcType.getRank() - 1 ||
+      (srcType.getShape().back() >= blockElements &&
+       resultType.getShape().back() >= blockElements))
+    return {};
+  for (int64_t dim : srcType.getShape())
+    if (dim <= 0 || (dim & (dim - 1)))
+      return {};
+
+  // Complete admission before emitting widening or scratch allocations. A
+  // rejected recursive attempt must not leave private operations in native IR.
+  if (narrow) {
     // CANN's narrow-element transpose may pad each element into a UB row.
     // Widen storage only; truncation restores the original bits exactly.
     auto wideSrcType = RankedTensorType::get(srcType.getShape(), rewriter.getI16Type());
@@ -280,25 +299,9 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
     Value resultShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(resultType.getShape()));
     return rewriter.create<tensor::ReshapeOp>(loc, resultType, narrowed, resultShape);
   }
-  if (!elemType.isIntOrFloat() ||
-      (elemType.getIntOrFloatBitWidth() != 16 &&
-       elemType.getIntOrFloatBitWidth() != 32))
-    return {};
-  int64_t count = srcType.getNumElements();
-  int64_t blockElements = 32 / (elemType.getIntOrFloatBitWidth() / 8);
-  if (count < blockElements || count > 4096 ||
-      order.back() == srcType.getRank() - 1 ||
-      (srcType.getShape().back() >= blockElements &&
-       resultType.getShape().back() >= blockElements))
-    return {};
-
   // Power-of-two axes permit exact vector shift/mask index generation.
   // Non-splat tensor constants bufferize to untagged memref globals in CANN 9;
-  // feeding those directly to VGather crashes its stride-alignment pass.
-  // Generate the static permutation's addresses in UB instead.
-  for (int64_t dim : srcType.getShape())
-    if (dim <= 0 || (dim & (dim - 1)))
-      return {};
+  // generate the static permutation's addresses in UB instead.
   SmallVector<int64_t> srcStrides(srcType.getRank(), 1);
   for (int i = srcType.getRank() - 2; i >= 0; --i)
     srcStrides[i] = srcStrides[i + 1] * srcType.getDimSize(i + 1);
