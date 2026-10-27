@@ -216,6 +216,21 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
     return rewriter.create<tensor::ReshapeOp>(loc, resultType, src, shape);
   }
   auto elemType = srcType.getElementType();
+  if (elemType.isInteger(8) || elemType.isInteger(1)) {
+    // CANN's narrow-element transpose may pad each element into a UB row.
+    // Widen storage only; truncation restores the original bits exactly.
+    auto wideSrcType = RankedTensorType::get(srcType.getShape(), rewriter.getI16Type());
+    auto wideResultType = RankedTensorType::get(resultType.getShape(), rewriter.getI16Type());
+    Value wide;
+    if (cast<IntegerType>(elemType).isUnsigned() || elemType.isInteger(1))
+      wide = rewriter.create<arith::ExtUIOp>(loc, wideSrcType, src);
+    else
+      wide = rewriter.create<arith::ExtSIOp>(loc, wideSrcType, src);
+    Value permuted = tryPackedVectorTranspose(wide, wideResultType, order, loc, rewriter);
+    if (!permuted)
+      return {};
+    return rewriter.create<arith::TruncIOp>(loc, resultType, permuted);
+  }
   if (!elemType.isIntOrFloat() ||
       (elemType.getIntOrFloatBitWidth() != 16 &&
        elemType.getIntOrFloatBitWidth() != 32))
@@ -1985,6 +2000,25 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
     return rewriter.notifyMatchFailure(op, "join requires a static shape");
   int64_t count = inputType.getNumElements();
   auto elemType = inputType.getElementType();
+  auto originalResultType = resultType;
+  bool narrow = elemType.isInteger(8) || elemType.isInteger(1);
+  if (narrow) {
+    auto wideType = RankedTensorType::get(inputType.getShape(), rewriter.getI16Type());
+    auto extend = [&](Value value) -> Value {
+      if (cast<IntegerType>(elemType).isUnsigned() || elemType.isInteger(1))
+        return rewriter.create<arith::ExtUIOp>(loc, wideType, value);
+      return rewriter.create<arith::ExtSIOp>(loc, wideType, value);
+    };
+    lhs = extend(lhs);
+    rhs = extend(rhs);
+    elemType = rewriter.getI16Type();
+    resultType = RankedTensorType::get(resultType.getShape(), elemType);
+  }
+  auto finish = [&](Value value) {
+    if (narrow)
+      value = rewriter.create<arith::TruncIOp>(loc, originalResultType, value);
+    rewriter.replaceOp(op, value);
+  };
   // Keep the two channels compact before transposition. The stride-2 slice
   // spelling selects CANN's interleave library even for padded UB operands;
   // that implementation does not honor their logical strides. This spelling
@@ -2010,7 +2044,7 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
     Value empty = rewriter.create<tensor::EmptyOp>(loc, flatResultType.getShape(), elemType);
     Value first = rewriter.create<tensor::InsertOp>(loc, a, empty, zero);
     Value second = rewriter.create<tensor::InsertOp>(loc, b, first, one);
-    rewriter.replaceOp(op, reshape(second, resultType.getShape()));
+    finish(reshape(second, resultType.getShape()));
     return success();
   }
   auto packedType = RankedTensorType::get({2 * count}, elemType);
@@ -2023,7 +2057,7 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   if (!interleaved)
     interleaved = ConverterUtils::getTransposedValue(
         channels, loc, rewriter, {1, 0});
-  rewriter.replaceOp(op, reshape(interleaved, resultType.getShape()));
+  finish(reshape(interleaved, resultType.getShape()));
   return success();
 }
 
@@ -2222,7 +2256,7 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
   bool word = element.isF16() || element.isBF16() || element.isF32() ||
               element.isInteger(16) || element.isInteger(32);
   if ((word || narrow) && !inputType.getEncoding() && !outType.getEncoding() &&
-      !canFoldSplitIntoDenseLoad(input)) {
+      (narrow || !canFoldSplitIntoDenseLoad(input))) {
     int64_t count = outType.getNumElements();
     Type storageElement = narrow ? rewriter.getI16Type() : element;
     if (narrow) {
