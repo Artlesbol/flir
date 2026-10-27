@@ -1866,38 +1866,35 @@ LogicalResult UnrealizedCastConverter::matchAndRewrite(
 LogicalResult
 JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
                                ConversionPatternRewriter &rewriter) const {
-  Value opa = op.getLhs();
-  Value opb = op.getRhs();
   auto loc = op.getLoc();
-
-  auto resType = dyn_cast<RankedTensorType>(op.getResult().getType());
-  Value emptyOp = rewriter.create<tensor::EmptyOp>(loc, resType.getShape(),
-                                                   resType.getElementType());
-
-  auto shape = dyn_cast<RankedTensorType>(opa.getType()).getShape();
-  auto sizes = llvm::map_to_vector(shape, [&](int64_t t) {
-    return OpFoldResult(rewriter.getI64IntegerAttr(t));
-  });
-  sizes.push_back(rewriter.getI64IntegerAttr(1));
-
-  int64_t rank = resType.getRank();
-
-  // Set last dimension stride to 2 in layout
-  // As last dimension size is always 1, last dimension stride here could be
-  // either 1 or 2, while stride `2` could carry interleave trait and it's
-  // convenient for next lower.
-  SmallVector<OpFoldResult> strides(rank, rewriter.getIndexAttr(1));
-  strides.back() = rewriter.getIndexAttr(2);
-
-  SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
-
-  auto insert0 = rewriter.create<tensor::InsertSliceOp>(
-      loc, opa, emptyOp, offsets, sizes, strides);
-
-  offsets.back() = rewriter.getIndexAttr(1);
-  auto insert1 = rewriter.create<tensor::InsertSliceOp>(
-      loc, opb, insert0, offsets, sizes, strides);
-  rewriter.replaceOp(op, insert1);
+  Value lhs = op.getLhs(), rhs = op.getRhs();
+  auto inputType = cast<RankedTensorType>(lhs.getType());
+  auto resultType = cast<RankedTensorType>(op.getResult().getType());
+  if (!inputType.hasStaticShape())
+    return rewriter.notifyMatchFailure(op, "join requires a static shape");
+  int64_t count = inputType.getNumElements();
+  auto elemType = inputType.getElementType();
+  // Keep the two channels compact before transposition. The stride-2 slice
+  // spelling selects CANN's interleave library even for padded UB operands;
+  // that implementation does not honor their logical strides. This spelling
+  // uses regular concat/transpose lowering with an explicit element order.
+  auto reshape = [&](Value value, ArrayRef<int64_t> shape) -> Value {
+    auto type = RankedTensorType::get(shape, elemType);
+    if (value.getType() == type)
+      return value;
+    Value shapeValue = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64TensorAttr(shape));
+    return rewriter.create<tensor::ReshapeOp>(loc, type, value, shapeValue);
+  };
+  lhs = reshape(lhs, {count});
+  rhs = reshape(rhs, {count});
+  auto packedType = RankedTensorType::get({2 * count}, elemType);
+  Value packed = rewriter.create<tensor::ConcatOp>(
+      loc, packedType, 0, ValueRange{lhs, rhs});
+  Value channels = reshape(packed, {2, count});
+  Value interleaved = ConverterUtils::getTransposedValue(
+      channels, loc, rewriter, {1, 0});
+  rewriter.replaceOp(op, reshape(interleaved, resultType.getShape()));
   return success();
 }
 
