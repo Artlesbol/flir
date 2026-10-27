@@ -1959,6 +1959,20 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   };
   lhs = reshape(lhs, {count});
   rhs = reshape(rhs, {count});
+  if (count == 1) {
+    // A two-scalar join has no vector-length data loop. Avoid CANN concat's
+    // block-copy path for sub-block sources; insert the two exact elements.
+    auto flatResultType = RankedTensorType::get({2}, elemType);
+    Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
+    Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
+    Value a = rewriter.create<tensor::ExtractOp>(loc, elemType, lhs, zero);
+    Value b = rewriter.create<tensor::ExtractOp>(loc, elemType, rhs, zero);
+    Value empty = rewriter.create<tensor::EmptyOp>(loc, flatResultType.getShape(), elemType);
+    Value first = rewriter.create<tensor::InsertOp>(loc, a, empty, zero);
+    Value second = rewriter.create<tensor::InsertOp>(loc, b, first, one);
+    rewriter.replaceOp(op, reshape(second, resultType.getShape()));
+    return success();
+  }
   auto packedType = RankedTensorType::get({2 * count}, elemType);
   Value packed = rewriter.create<tensor::ConcatOp>(
       loc, packedType, 0, ValueRange{lhs, rhs});
