@@ -912,11 +912,13 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
     signalPassFailure();
     return;
   }
-  RewritePatternSet splitPatterns(&getContext());
-  splitPatterns.add<SplitBeforeTranspose>(&getContext());
-  if (failed(applyPatternsGreedily(moduleOp, std::move(splitPatterns)))) {
-    signalPassFailure();
-    return;
+  if (!compileOn91095Flag) {
+    RewritePatternSet splitPatterns(&getContext());
+    splitPatterns.add<SplitBeforeTranspose>(&getContext());
+    if (failed(applyPatternsGreedily(moduleOp, std::move(splitPatterns)))) {
+      signalPassFailure();
+      return;
+    }
   }
 
   // Check if the kernel contains tl.dot. Without tl.dot,

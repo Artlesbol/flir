@@ -1,5 +1,9 @@
 // RUN: triton-shared-opt --triton-to-linalg-incubated --split-input-file %s | FileCheck %s
+// RUN: triton-shared-opt --triton-to-linalg-incubated=compile-on-910-95=true --split-input-file %s | FileCheck %s --check-prefix=LEGACY
 // REQUIRES: flir-incubated
+
+// LEGACY: module
+// LEGACY-NOT: custom_flagtree_
 
 // Exact inverses must fold before splitting into physical channel buffers.
 // CHECK-LABEL: func.func @inverse(
@@ -19,7 +23,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 // Independent inputs cannot be folded away.
 // CHECK-LABEL: func.func @independent_join(
 // CHECK: tensor.concat
-// CHECK: symbol = "custom_flagtree_stride_gather_float"
+// CHECK: symbol = "custom_flagtree_stride_gather_int32"
 // CHECK: return
 module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
   func.func @independent_join(%a: tensor<32xf32>, %b: tensor<32xf32>) -> tensor<32x2xf32> {

@@ -230,7 +230,9 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
                                      ArrayRef<int> order, Location loc,
                                      ConversionPatternRewriter &rewriter) {
   auto srcType = dyn_cast<RankedTensorType>(src.getType());
-  if (!srcType || !srcType.hasStaticShape() || srcType.getEncoding() ||
+  // The packaged primitive currently targets dav-c220. Keep the existing
+  // lowering on the separately selected 910_95 architecture.
+  if (compileOn91095Flag || !srcType || !srcType.hasStaticShape() || srcType.getEncoding() ||
       resultType.getEncoding() || order.empty())
     return {};
   SmallVector<int> sourceAxes, resultAxes;
@@ -2033,11 +2035,35 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   Value lhs = op.getLhs(), rhs = op.getRhs();
   auto inputType = cast<RankedTensorType>(lhs.getType());
   auto resultType = cast<RankedTensorType>(op.getResult().getType());
+  if (compileOn91095Flag || inputType.getEncoding() || resultType.getEncoding()) {
+    Value empty = rewriter.create<tensor::EmptyOp>(
+        loc, resultType.getShape(), resultType.getElementType());
+    auto sizes = llvm::map_to_vector(inputType.getShape(), [&](int64_t size) {
+      return OpFoldResult(rewriter.getIndexAttr(size));
+    });
+    sizes.push_back(rewriter.getIndexAttr(1));
+    SmallVector<OpFoldResult> offsets(resultType.getRank(), rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> strides(resultType.getRank(), rewriter.getIndexAttr(1));
+    strides.back() = rewriter.getIndexAttr(2);
+    Value first = rewriter.create<tensor::InsertSliceOp>(loc, lhs, empty, offsets, sizes, strides);
+    offsets.back() = rewriter.getIndexAttr(1);
+    Value second = rewriter.create<tensor::InsertSliceOp>(loc, rhs, first, offsets, sizes, strides);
+    rewriter.replaceOp(op, second);
+    return success();
+  }
   if (!inputType.hasStaticShape())
     return rewriter.notifyMatchFailure(op, "join requires a static shape");
   int64_t count = inputType.getNumElements();
   auto elemType = inputType.getElementType();
   auto originalResultType = resultType;
+  bool bitwise = elemType.isF16() || elemType.isBF16() || elemType.isF32();
+  if (bitwise) {
+    elemType = rewriter.getIntegerType(elemType.getIntOrFloatBitWidth());
+    auto bitsType = RankedTensorType::get(inputType.getShape(), elemType);
+    lhs = rewriter.create<arith::BitcastOp>(loc, bitsType, lhs);
+    rhs = rewriter.create<arith::BitcastOp>(loc, bitsType, rhs);
+    resultType = RankedTensorType::get(resultType.getShape(), elemType);
+  }
   bool narrow = elemType.isInteger(8) || elemType.isInteger(1);
   if (narrow) {
     auto wideType = RankedTensorType::get({count}, rewriter.getI16Type());
@@ -2062,6 +2088,8 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
       Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(originalResultType.getShape()));
       value = rewriter.create<tensor::ReshapeOp>(loc, originalResultType, value, shape);
     }
+    if (bitwise)
+      value = rewriter.create<arith::BitcastOp>(loc, originalResultType, value);
     rewriter.replaceOp(op, value);
   };
   // Keep the two channels compact before transposition. The stride-2 slice
@@ -2300,7 +2328,7 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
   bool narrow = element.isInteger(8) || element.isInteger(1);
   bool word = element.isF16() || element.isBF16() || element.isF32() ||
               element.isInteger(16) || element.isInteger(32);
-  if ((word || narrow) && !inputType.getEncoding() && !outType.getEncoding() &&
+  if (!compileOn91095Flag && (word || narrow) && !inputType.getEncoding() && !outType.getEncoding() &&
       (narrow || !canFoldSplitIntoDenseLoad(input))) {
     int64_t count = outType.getNumElements();
     Type storageElement = narrow ? rewriter.getI16Type() : element;
