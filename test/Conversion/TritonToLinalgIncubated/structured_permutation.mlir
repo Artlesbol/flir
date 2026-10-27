@@ -31,7 +31,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 // -----
 
 // CHECK-LABEL: func.func @static_transpose(
-// CHECK: hivm.hir.arange
+// CHECK: hivm.hir.varange
 // CHECK: arith.andi
 // CHECK: symbol = "custom_flagtree_stride_gather_half"
 // CHECK: return
