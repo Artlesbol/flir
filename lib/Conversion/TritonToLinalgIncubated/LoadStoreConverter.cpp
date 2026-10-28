@@ -82,6 +82,34 @@ using namespace Incubated;
 const std::string MayImplicitTransposeWithLastAxisTAG =
     "MayImplicitTransposeWithLastAxis";
 
+// A later packed reshape can prevent CANN from propagating stride alignment
+// back to a load. An unaligned UB row makes its strided GM load scalar. Keep
+// the DMA destination explicitly padded; a subsequent reshape compacts the
+// logical view in UB. Dense GM tensors retain their original coalescing path.
+static bool needsPaddedShortRowLoad(Operation *op, MemRefType type) {
+  auto module = op->getParentOfType<ModuleOp>();
+  auto target = module ? module->getAttrOfType<hacc::TargetAttr>("hacc.target")
+                       : hacc::TargetAttr();
+  if (compileOn91095Flag || !target ||
+      !target.getTarget().getValue().starts_with("Ascend910B") ||
+      type.getRank() != 2 || !type.hasStaticShape() || type.getDimSize(0) <= 1)
+    return false;
+  auto elem = type.getElementType();
+  if (!(elem.isF16() || elem.isBF16() || elem.isF32() || elem.isInteger(16) ||
+        elem.isInteger(32)))
+    return false;
+  int64_t cols = type.getDimSize(1), block = 256 / elem.getIntOrFloatBitWidth();
+  SmallVector<int64_t> strides;
+  int64_t offset;
+#if LLVM_VERSION_MAJOR < 22
+  auto layout = getStridesAndOffset(type, strides, offset);
+#else
+  auto layout = type.getStridesAndOffset(strides, offset);
+#endif
+  return cols > 0 && cols < block && succeeded(layout) && strides[1] == 1 &&
+         !ShapedType::isDynamic(strides[0]) && strides[0] > cols;
+}
+
 LogicalResult
 AddPtrConverter::matchAndRewrite(triton::AddPtrOp op, OpAdaptor adaptor,
                                  ConversionPatternRewriter &rewriter) const {
@@ -363,8 +391,22 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
                                   insertSliceOp.getDest(), insertSliceOp);
     rewriter.eraseOp(insertSliceOp);
   } else {
-    allocOp = rewriter.create<memref::AllocOp>(
-        loc, MemRefType::get(memRefShape, memRefElementType));
+    if (needsPaddedShortRowLoad(op, memRefType)) {
+      SmallVector<int64_t> physicalShape(memRefShape);
+      physicalShape[1] = 256 / memRefElementType.getIntOrFloatBitWidth();
+      allocOpTmp = rewriter.create<memref::AllocOp>(
+          loc, MemRefType::get(physicalShape, memRefElementType));
+      SmallVector<OpFoldResult> offsets(2, rewriter.getIndexAttr(0));
+      SmallVector<OpFoldResult> strides(2, rewriter.getIndexAttr(1));
+      SmallVector<OpFoldResult> sizes;
+      for (int64_t dim : memRefShape)
+        sizes.push_back(rewriter.getIndexAttr(dim));
+      allocOp = rewriter.create<memref::SubViewOp>(loc, allocOpTmp, offsets,
+                                                   sizes, strides);
+    } else {
+      allocOp = rewriter.create<memref::AllocOp>(
+          loc, MemRefType::get(memRefShape, memRefElementType));
+    }
   }
 
   auto tensorType = RankedTensorType::get(memRefShape, memRefElementType);
