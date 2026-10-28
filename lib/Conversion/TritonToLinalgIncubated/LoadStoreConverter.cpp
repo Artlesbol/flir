@@ -1176,7 +1176,7 @@ static bool tryShortRowStore(Operation *op, Value value, Value destination,
   Value scratch = rewriter.create<memref::AllocOp>(loc, scratchType);
   auto store = rewriter.create<hivm::CustomOp>(
       loc, TypeRange{}, "flagtree.short_row_store", ValueRange{value},
-      ValueRange{destination}, ValueRange{addresses, scratch});
+      ValueRange{destination, addresses, scratch}, ValueRange{});
   store.setCoreType(hivm::TCoreType::VECTOR);
   // The implementation returns to PIPE_V only after its internal DMA finishes.
   store.setPipe(hivm::PIPE::PIPE_V);
