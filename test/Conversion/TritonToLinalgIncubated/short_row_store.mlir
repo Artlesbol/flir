@@ -319,7 +319,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
   %ptr = tt.addptr %p, %off : tensor<32x4x!tt.ptr<f32>>, tensor<32x4xi32>
   %ip = tt.splat %input : !tt.ptr<f32> -> tensor<32x4x!tt.ptr<f32>>
   %iptr = tt.addptr %ip, %off : tensor<32x4x!tt.ptr<f32>>, tensor<32x4xi32>
-  %loaded = tt.load %iptr {cache = 1 : i32} : tensor<32x4x!tt.ptr<f32>>
+  %loaded = tt.load %iptr {cache = 2 : i32} : tensor<32x4x!tt.ptr<f32>>
   %one = arith.constant dense<1.000000e+00> : tensor<32x4xf32>
   %value = arith.addf %loaded, %one : tensor<32x4xf32>
   tt.store %ptr, %value : tensor<32x4x!tt.ptr<f32>>
