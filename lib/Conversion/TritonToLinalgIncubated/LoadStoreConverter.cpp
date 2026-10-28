@@ -82,11 +82,10 @@ using namespace Incubated;
 const std::string MayImplicitTransposeWithLastAxisTAG =
     "MayImplicitTransposeWithLastAxis";
 
-// A later packed reshape can prevent CANN from propagating stride alignment
-// back to a load. An unaligned UB row makes its strided GM load scalar. Keep
-// the DMA destination explicitly padded; a subsequent reshape compacts the
-// logical view in UB. Dense GM tensors retain their original coalescing path.
-static bool needsPaddedShortRowLoad(Operation *op, MemRefType type) {
+// A packed consumer can make a short-row strided GM load scalar in CANN.
+// Lower full unmasked tiles through a bounded DMA/vector primitive; dense GM
+// tensors and loads with cache/volatile semantics keep their original path.
+static bool supportsShortRowLoad(Operation *op, MemRefType type) {
   auto module = op->getParentOfType<ModuleOp>();
   auto target = module ? module->getAttrOfType<hacc::TargetAttr>("hacc.target")
                        : hacc::TargetAttr();
@@ -107,7 +106,8 @@ static bool needsPaddedShortRowLoad(Operation *op, MemRefType type) {
   auto layout = type.getStridesAndOffset(strides, offset);
 #endif
   return cols > 0 && cols < block && succeeded(layout) && strides[1] == 1 &&
-         !ShapedType::isDynamic(strides[0]) && strides[0] > cols;
+         !ShapedType::isDynamic(strides[0]) && strides[0] > cols &&
+         strides[0] <= UINT32_MAX / (elem.getIntOrFloatBitWidth() / 8);
 }
 
 LogicalResult
@@ -345,6 +345,39 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
   auto memRefShape = memRefType.getShape();
   auto memRefElementType = memRefType.getElementType();
 
+  if (!mask && op.getBoundaryCheck().empty() && !op.getIsVolatile() &&
+      op.getCache() == triton::CacheModifier::NONE &&
+      op.getEvict() == triton::EvictionPolicy::NORMAL &&
+      !op->hasAttr(ConverterUtils::discreteAttrName) &&
+      supportsShortRowLoad(op, memRefType)) {
+    auto resultType = RankedTensorType::get(memRefShape, memRefElementType);
+    Value result = rewriter.create<bufferization::AllocTensorOp>(
+        loc, resultType, ValueRange{});
+    int64_t slots = std::min(int64_t(128), memRefShape[0]) * 8;
+    auto workType = MemRefType::get(
+        {slots}, rewriter.getI32Type(), MemRefLayoutAttrInterface(),
+        hivm::AddressSpaceAttr::get(rewriter.getContext(),
+                                    hivm::AddressSpace::UB));
+    Value work = rewriter.create<memref::AllocOp>(loc, workType);
+    auto load = rewriter.create<hivm::CustomOp>(
+        loc, TypeRange{resultType}, "flagtree.short_row_load", ValueRange{ptr},
+        ValueRange{result, work}, ValueRange{});
+    load.setCoreType(hivm::TCoreType::VECTOR);
+    load.setPipe(hivm::PIPE::PIPE_V);
+    load.setVFMode(hivm::VFMode::SIMD);
+    StringRef suffix = memRefElementType.isF16()         ? "half"
+                       : memRefElementType.isBF16()      ? "bf16"
+                       : memRefElementType.isF32()       ? "float"
+                       : memRefElementType.isInteger(16) ? "int16"
+                                                         : "int32";
+    load->setAttr("symbol",
+                  rewriter.getStringAttr(
+                      ("custom_flagtree_short_row_load_" + suffix).str()));
+    load->setAttr("max_rank", rewriter.getI64IntegerAttr(2));
+    rewriter.replaceOp(op, load->getResult(0));
+    return success();
+  }
+
   Value allocOp;
   Value allocOpTmp;
   if (op->hasAttr(ConverterUtils::discreteAttrName)) {
@@ -393,16 +426,6 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
   } else {
     allocOp = rewriter.create<memref::AllocOp>(
         loc, MemRefType::get(memRefShape, memRefElementType));
-    if (needsPaddedShortRowLoad(op, memRefType)) {
-      // A padded alloc/subview alone can be folded into the packed consumer.
-      // Preserve the requirement through CANN's storage-alignment pass, which
-      // inserts a constrained UB copy when the later reshape cannot be a view.
-      auto mark = rewriter.create<annotation::MarkOp>(loc, allocOp);
-      mark->setAttr("hivm.stride_align_dims",
-                    rewriter.getDenseI32ArrayAttr({0}));
-      mark->setAttr("hivm.stride_align_value_in_byte",
-                    rewriter.getDenseI32ArrayAttr({32}));
-    }
   }
 
   auto tensorType = RankedTensorType::get(memRefShape, memRefElementType);
