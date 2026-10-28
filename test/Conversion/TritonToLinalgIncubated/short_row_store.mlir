@@ -2,6 +2,8 @@
 // REQUIRES: flir-incubated
 
 // CHECK-LABEL: func.func @short_f32(
+// CHECK: memref.alloc() : memref<32x8xf32>
+// CHECK: memref.subview
 // CHECK-COUNT-2: memref.alloc() : memref<256xi32, #hivm.address_space<ub>>
 // CHECK: symbol = "custom_flagtree_short_row_store_float"
 // CHECK: return
@@ -31,6 +33,8 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 // -----
 
 // CHECK-LABEL: func.func @short_f16(
+// CHECK: memref.alloc() : memref<32x16xf16>
+// CHECK: memref.subview
 // CHECK-COUNT-2: memref.alloc() : memref<512xi32, #hivm.address_space<ub>>
 // CHECK: symbol = "custom_flagtree_short_row_store_half"
 // CHECK: return
@@ -60,6 +64,8 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 // -----
 
 // CHECK-LABEL: func.func @short_bf16(
+// CHECK: memref.alloc() : memref<32x16xbf16>
+// CHECK: memref.subview
 // CHECK-COUNT-2: memref.alloc() : memref<512xi32, #hivm.address_space<ub>>
 // CHECK: symbol = "custom_flagtree_short_row_store_bf16"
 // CHECK: return
@@ -89,6 +95,8 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 // -----
 
 // CHECK-LABEL: func.func @short_i32(
+// CHECK: memref.alloc() : memref<16x8xi32>
+// CHECK: memref.subview
 // CHECK-COUNT-2: memref.alloc() : memref<128xi32, #hivm.address_space<ub>>
 // CHECK: symbol = "custom_flagtree_short_row_store_int32"
 // CHECK: return
@@ -118,6 +126,8 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 // -----
 
 // CHECK-LABEL: func.func @short_i16(
+// CHECK: memref.alloc() : memref<8x16xi16>
+// CHECK: memref.subview
 // CHECK-COUNT-2: memref.alloc() : memref<128xi32, #hivm.address_space<ub>>
 // CHECK: symbol = "custom_flagtree_short_row_store_int16"
 // CHECK: return
