@@ -391,21 +391,17 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
                                   insertSliceOp.getDest(), insertSliceOp);
     rewriter.eraseOp(insertSliceOp);
   } else {
+    allocOp = rewriter.create<memref::AllocOp>(
+        loc, MemRefType::get(memRefShape, memRefElementType));
     if (needsPaddedShortRowLoad(op, memRefType)) {
-      SmallVector<int64_t> physicalShape(memRefShape);
-      physicalShape[1] = 256 / memRefElementType.getIntOrFloatBitWidth();
-      allocOpTmp = rewriter.create<memref::AllocOp>(
-          loc, MemRefType::get(physicalShape, memRefElementType));
-      SmallVector<OpFoldResult> offsets(2, rewriter.getIndexAttr(0));
-      SmallVector<OpFoldResult> strides(2, rewriter.getIndexAttr(1));
-      SmallVector<OpFoldResult> sizes;
-      for (int64_t dim : memRefShape)
-        sizes.push_back(rewriter.getIndexAttr(dim));
-      allocOp = rewriter.create<memref::SubViewOp>(loc, allocOpTmp, offsets,
-                                                   sizes, strides);
-    } else {
-      allocOp = rewriter.create<memref::AllocOp>(
-          loc, MemRefType::get(memRefShape, memRefElementType));
+      // A padded alloc/subview alone can be folded into the packed consumer.
+      // Preserve the requirement through CANN's storage-alignment pass, which
+      // inserts a constrained UB copy when the later reshape cannot be a view.
+      auto mark = rewriter.create<annotation::MarkOp>(loc, allocOp);
+      mark->setAttr("hivm.stride_align_dims",
+                    rewriter.getDenseI32ArrayAttr({0}));
+      mark->setAttr("hivm.stride_align_value_in_byte",
+                    rewriter.getDenseI32ArrayAttr({32}));
     }
   }
 
