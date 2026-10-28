@@ -238,7 +238,9 @@ static Value castPermutationStorage(Value input, RankedTensorType type,
 
 // Small innermost axes otherwise become one padded UB row per few elements.
 // Express their static permutation as a single packed vector gather instead.
-// Bound the index buffer to 16 KiB so a large transpose retains native tiling.
+// This also applies when the last axis stays in place: native 3-D transpose
+// pads a short last axis, and its following compaction can use unaligned VEC
+// destinations. Bound the index buffer to 16 KiB for larger native tiling.
 // This is a code-generation choice for a constant permutation, not a dynamic
 // Triton gather, and preserves the exact bit pattern of every element.
 static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
@@ -274,7 +276,6 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
   int64_t storageBits = narrow ? 16 : elemType.getIntOrFloatBitWidth();
   int64_t blockElements = 32 / (storageBits / 8);
   if (count < blockElements || count > 4096 ||
-      order.back() == srcType.getRank() - 1 ||
       (srcType.getShape().back() >= blockElements &&
        resultType.getShape().back() >= blockElements))
     return {};

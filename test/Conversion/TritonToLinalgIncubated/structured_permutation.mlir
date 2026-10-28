@@ -131,3 +131,18 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
     return %y : tensor<4096x2xi8>
   }
 }
+
+// -----
+
+// Preserving a short final axis still needs a packed physical layout.
+// CHECK-LABEL: func.func @unchanged_short_inner_axis(
+// CHECK-NOT: linalg.transpose
+// CHECK: symbol = "custom_flagtree_stride_gather_float"
+// CHECK-NOT: linalg.transpose
+// CHECK: return
+module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+  func.func @unchanged_short_inner_axis(%x: tensor<16x4x2xf32>) -> tensor<4x16x2xf32> {
+    %y = tt.trans %x {order = array<i32: 1, 0, 2>} : tensor<16x4x2xf32> -> tensor<4x16x2xf32>
+    return %y : tensor<4x16x2xf32>
+  }
+}
