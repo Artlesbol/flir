@@ -38,6 +38,7 @@
 #include <cstdlib>
 #include <utility>
 
+#include "bishengir/Dialect/HACC/IR/HACC.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -49,7 +50,6 @@
 #include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/ValueRange.h"
 #include "mlir/Interfaces/CallInterfaces.h"
-#include "bishengir/Dialect/HACC/IR/HACC.h"
 #if __has_include("bishengir/Dialect/Annotation/IR/Annotation.h")
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #endif
@@ -206,25 +206,31 @@ static Value castPermutationStorage(Value input, RankedTensorType type,
                                     Location loc,
                                     ConversionPatternRewriter &rewriter) {
   auto srcType = cast<RankedTensorType>(input.getType());
-  bool extend = srcType.getElementType().isInteger(8) && type.getElementType().isInteger(16);
-  bool truncate = srcType.getElementType().isInteger(16) && type.getElementType().isInteger(8);
+  bool extend = srcType.getElementType().isInteger(8) &&
+                type.getElementType().isInteger(16);
+  bool truncate = srcType.getElementType().isInteger(16) &&
+                  type.getElementType().isInteger(8);
   if (!extend && !truncate) {
-    if (srcType.getElementType().getIntOrFloatBitWidth() > type.getElementType().getIntOrFloatBitWidth())
+    if (srcType.getElementType().getIntOrFloatBitWidth() >
+        type.getElementType().getIntOrFloatBitWidth())
       return rewriter.create<arith::TruncIOp>(loc, type, input);
     return rewriter.create<arith::ExtUIOp>(loc, type, input);
   }
   assert(srcType.getRank() == 1 && type.getRank() == 1);
-  Value empty = rewriter.create<bufferization::AllocTensorOp>(loc, type, ValueRange{});
+  Value empty =
+      rewriter.create<bufferization::AllocTensorOp>(loc, type, ValueRange{});
   auto tempType = RankedTensorType::get(type.getShape(), rewriter.getF16Type());
-  Value temp = rewriter.create<bufferization::AllocTensorOp>(loc, tempType, ValueRange{});
+  Value temp = rewriter.create<bufferization::AllocTensorOp>(loc, tempType,
+                                                             ValueRange{});
   auto cast = rewriter.create<hivm::CustomOp>(
       loc, TypeRange{type, tempType}, "flagtree.structured_storage_cast",
       ValueRange{input}, ValueRange{empty, temp}, ValueRange{});
   cast.setCoreType(hivm::TCoreType::VECTOR);
   cast.setPipe(hivm::PIPE::PIPE_V);
   cast.setVFMode(hivm::VFMode::SIMD);
-  cast->setAttr("symbol", rewriter.getStringAttr(extend ?
-      "custom_flagtree_byte_to_word" : "custom_flagtree_word_to_byte"));
+  cast->setAttr("symbol", rewriter.getStringAttr(
+                              extend ? "custom_flagtree_byte_to_word"
+                                     : "custom_flagtree_word_to_byte"));
   cast->setAttr("max_rank", rewriter.getI64IntegerAttr(1));
   cast->setAttr("no_side_effect", rewriter.getUnitAttr());
   return cast->getResult(0);
@@ -236,8 +242,8 @@ static Value castPermutationStorage(Value input, RankedTensorType type,
 // This is a code-generation choice for a constant permutation, not a dynamic
 // Triton gather, and preserves the exact bit pattern of every element.
 static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
-                                     ArrayRef<int> order, Location loc,
-                                     ConversionPatternRewriter &rewriter) {
+                                      ArrayRef<int> order, Location loc,
+                                      ConversionPatternRewriter &rewriter) {
   auto srcType = dyn_cast<RankedTensorType>(src.getType());
   // The packaged primitive currently targets dav-c220. Keep the existing
   // lowering on the separately selected 910_95 architecture.
@@ -260,9 +266,9 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
   }
   auto elemType = srcType.getElementType();
   bool narrow = elemType.isInteger(8) || elemType.isInteger(1);
-  if (!narrow && (!elemType.isIntOrFloat() ||
-      (elemType.getIntOrFloatBitWidth() != 16 &&
-       elemType.getIntOrFloatBitWidth() != 32)))
+  if (!narrow &&
+      (!elemType.isIntOrFloat() || (elemType.getIntOrFloatBitWidth() != 16 &&
+                                    elemType.getIntOrFloatBitWidth() != 32)))
     return {};
   int64_t count = srcType.getNumElements();
   int64_t storageBits = narrow ? 16 : elemType.getIntOrFloatBitWidth();
@@ -281,23 +287,33 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
   if (narrow) {
     // CANN's narrow-element transpose may pad each element into a UB row.
     // Widen storage only; truncation restores the original bits exactly.
-    auto wideSrcType = RankedTensorType::get(srcType.getShape(), rewriter.getI16Type());
-    auto wideResultType = RankedTensorType::get(resultType.getShape(), rewriter.getI16Type());
+    auto wideSrcType =
+        RankedTensorType::get(srcType.getShape(), rewriter.getI16Type());
+    auto wideResultType =
+        RankedTensorType::get(resultType.getShape(), rewriter.getI16Type());
     int64_t count = srcType.getNumElements();
     auto narrowFlatType = RankedTensorType::get({count}, elemType);
     auto wideFlatType = RankedTensorType::get({count}, rewriter.getI16Type());
-    Value flatShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({count}));
-    Value flat = rewriter.create<tensor::ReshapeOp>(loc, narrowFlatType, src, flatShape);
+    Value flatShape = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64TensorAttr({count}));
+    Value flat =
+        rewriter.create<tensor::ReshapeOp>(loc, narrowFlatType, src, flatShape);
     Value wide = castPermutationStorage(flat, wideFlatType, loc, rewriter);
-    Value srcShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(srcType.getShape()));
+    Value srcShape = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64TensorAttr(srcType.getShape()));
     wide = rewriter.create<tensor::ReshapeOp>(loc, wideSrcType, wide, srcShape);
-    Value permuted = tryPackedVectorTranspose(wide, wideResultType, order, loc, rewriter);
+    Value permuted =
+        tryPackedVectorTranspose(wide, wideResultType, order, loc, rewriter);
     if (!permuted)
       return {};
-    Value wideFlat = rewriter.create<tensor::ReshapeOp>(loc, wideFlatType, permuted, flatShape);
-    Value narrowed = castPermutationStorage(wideFlat, narrowFlatType, loc, rewriter);
-    Value resultShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(resultType.getShape()));
-    return rewriter.create<tensor::ReshapeOp>(loc, resultType, narrowed, resultShape);
+    Value wideFlat = rewriter.create<tensor::ReshapeOp>(loc, wideFlatType,
+                                                        permuted, flatShape);
+    Value narrowed =
+        castPermutationStorage(wideFlat, narrowFlatType, loc, rewriter);
+    Value resultShape = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64TensorAttr(resultType.getShape()));
+    return rewriter.create<tensor::ReshapeOp>(loc, resultType, narrowed,
+                                              resultShape);
   }
   // Power-of-two axes permit exact vector shift/mask index generation.
   // Non-splat tensor constants bufferize to untagged memref globals in CANN 9;
@@ -308,12 +324,14 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
   auto flatType = RankedTensorType::get({count}, elemType);
   Value flatShape = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI64TensorAttr({count}));
-  Value flat = rewriter.create<tensor::ReshapeOp>(loc, flatType, src, flatShape);
+  Value flat =
+      rewriter.create<tensor::ReshapeOp>(loc, flatType, src, flatShape);
   auto indexType = RankedTensorType::get({count}, rewriter.getI32Type());
   Value indexEmpty = rewriter.create<tensor::EmptyOp>(
       loc, ArrayRef<int64_t>{count}, rewriter.getI32Type());
-  Value range = rewriter.create<hivm::VArangeOp>(
-      loc, TypeRange{indexType}, indexEmpty)->getResult(0);
+  Value range =
+      rewriter.create<hivm::VArangeOp>(loc, TypeRange{indexType}, indexEmpty)
+          ->getResult(0);
   auto splat = [&](int64_t value) -> Value {
     auto attr = DenseIntElementsAttr::get(
         indexType, ArrayRef<int32_t>{static_cast<int32_t>(value)});
@@ -339,29 +357,34 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
     for (int64_t width = size; width > 1; width /= 2)
       ++shift;
   }
-  Value empty = rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{count}, elemType);
+  Value empty =
+      rewriter.create<tensor::EmptyOp>(loc, ArrayRef<int64_t>{count}, elemType);
   // CANN's built-in VGather implementation assumes physical unit strides.
   // Preserve the logical contract with the backend-owned implementation;
   // its custom-op boundary also prevents unrelated operand stride alignment.
   Value addresses = rewriter.create<bufferization::AllocTensorOp>(
       loc, indexType, ValueRange{});
-  StringRef suffix = elemType.isF16() ? "half" : elemType.isBF16() ? "bf16" :
-                     elemType.isF32() ? "float" :
-                     elemType.isInteger(16) ? "int16" : "int32";
+  StringRef suffix = elemType.isF16()         ? "half"
+                     : elemType.isBF16()      ? "bf16"
+                     : elemType.isF32()       ? "float"
+                     : elemType.isInteger(16) ? "int16"
+                                              : "int32";
   auto gather = rewriter.create<hivm::CustomOp>(
       loc, TypeRange{flatType, indexType}, "flagtree.structured_gather",
       ValueRange{flat, index}, ValueRange{empty, addresses}, ValueRange{});
   gather.setCoreType(hivm::TCoreType::VECTOR);
   gather.setPipe(hivm::PIPE::PIPE_V);
   gather.setVFMode(hivm::VFMode::SIMD);
-  gather->setAttr("symbol", rewriter.getStringAttr(
-      ("custom_flagtree_stride_gather_" + suffix).str()));
+  gather->setAttr("symbol",
+                  rewriter.getStringAttr(
+                      ("custom_flagtree_stride_gather_" + suffix).str()));
   gather->setAttr("max_rank", rewriter.getI64IntegerAttr(1));
   gather->setAttr("no_side_effect", rewriter.getUnitAttr());
   Value gathered = gather->getResult(0);
   Value resultShape = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI64TensorAttr(resultType.getShape()));
-  return rewriter.create<tensor::ReshapeOp>(loc, resultType, gathered, resultShape);
+  return rewriter.create<tensor::ReshapeOp>(loc, resultType, gathered,
+                                            resultShape);
 }
 
 LogicalResult
@@ -373,7 +396,7 @@ TransposeConverter::matchAndRewrite(triton::TransOp op, OpAdaptor adaptor,
       op.getLoc(), rewriter);
   if (!res)
     res = ConverterUtils::getTransposedValue(src, op.getLoc(), rewriter,
-                                           op.getOrder());
+                                             op.getOrder());
   rewriter.replaceOp(op, res);
   return success();
 }
@@ -2049,20 +2072,25 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   auto inputType = cast<RankedTensorType>(lhs.getType());
   auto resultType = cast<RankedTensorType>(op.getResult().getType());
   Type originalElement = inputType.getElementType();
-  bool supportedElement = originalElement.isF16() || originalElement.isBF16() ||
+  bool supportedElement =
+      originalElement.isF16() || originalElement.isBF16() ||
       originalElement.isF32() || originalElement.isInteger(8) ||
       originalElement.isInteger(16) || originalElement.isInteger(32);
   auto module = op->getParentOfType<ModuleOp>();
-  auto policy = module->getAttrOfType<StringAttr>("flagtree.structured_join_lowering");
+  auto policy =
+      module->getAttrOfType<StringAttr>("flagtree.structured_join_lowering");
   StringRef lowering = policy ? policy.getValue() : "auto";
   // Within the compact index budget, packed interleave avoids strided
   // transfers in both per-row and persistent dispatch. Keep native as an
   // explicit A/B policy; it still requires the original dense graph proof.
   bool preferNative = lowering == "native";
-  bool denseNative = preferNative && supportsStructuredPermutation(op) && supportedElement &&
+  bool denseNative =
+      preferNative && supportsStructuredPermutation(op) && supportedElement &&
       !originalElement.isInteger(8) && inputType.hasStaticShape() &&
-      !inputType.getEncoding() && !resultType.getEncoding() && inputType.getRank() == 1 &&
-      inputType.getNumElements() * originalElement.getIntOrFloatBitWidth() >= 256 &&
+      !inputType.getEncoding() && !resultType.getEncoding() &&
+      inputType.getRank() == 1 &&
+      inputType.getNumElements() * originalElement.getIntOrFloatBitWidth() >=
+          256 &&
       op->hasAttr("flagtree.dense_native_permutation");
   // Admit the complete packed algorithm only within its index-buffer budget.
   // In particular, do not widen a large byte join and then send it to a padded
@@ -2073,24 +2101,29 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
     auto storedType = resultType;
     bool rawBits = denseNative && isa<FloatType>(originalElement);
     if (rawBits) {
-      Type bits = rewriter.getIntegerType(originalElement.getIntOrFloatBitWidth());
+      Type bits =
+          rewriter.getIntegerType(originalElement.getIntOrFloatBitWidth());
       auto bitsInput = RankedTensorType::get(inputType.getShape(), bits);
       lhs = rewriter.create<arith::BitcastOp>(loc, bitsInput, lhs);
       rhs = rewriter.create<arith::BitcastOp>(loc, bitsInput, rhs);
       resultType = RankedTensorType::get(resultType.getShape(), bits);
     }
-    Value empty = rewriter.create<tensor::EmptyOp>(
-        loc, resultType.getShape(), resultType.getElementType());
+    Value empty = rewriter.create<tensor::EmptyOp>(loc, resultType.getShape(),
+                                                   resultType.getElementType());
     auto sizes = llvm::map_to_vector(inputType.getShape(), [&](int64_t size) {
       return OpFoldResult(rewriter.getIndexAttr(size));
     });
     sizes.push_back(rewriter.getIndexAttr(1));
-    SmallVector<OpFoldResult> offsets(resultType.getRank(), rewriter.getIndexAttr(0));
-    SmallVector<OpFoldResult> strides(resultType.getRank(), rewriter.getIndexAttr(1));
+    SmallVector<OpFoldResult> offsets(resultType.getRank(),
+                                      rewriter.getIndexAttr(0));
+    SmallVector<OpFoldResult> strides(resultType.getRank(),
+                                      rewriter.getIndexAttr(1));
     strides.back() = rewriter.getIndexAttr(2);
-    Value first = rewriter.create<tensor::InsertSliceOp>(loc, lhs, empty, offsets, sizes, strides);
+    Value first = rewriter.create<tensor::InsertSliceOp>(
+        loc, lhs, empty, offsets, sizes, strides);
     offsets.back() = rewriter.getIndexAttr(1);
-    Value second = rewriter.create<tensor::InsertSliceOp>(loc, rhs, first, offsets, sizes, strides);
+    Value second = rewriter.create<tensor::InsertSliceOp>(
+        loc, rhs, first, offsets, sizes, strides);
     if (rawBits)
       second = rewriter.create<arith::BitcastOp>(loc, storedType, second);
     rewriter.replaceOp(op, second);
@@ -2113,9 +2146,11 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   if (narrow) {
     auto wideType = RankedTensorType::get({count}, rewriter.getI16Type());
     auto narrowType = RankedTensorType::get({count}, elemType);
-    Value flatShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({count}));
+    Value flatShape = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64TensorAttr({count}));
     auto extend = [&](Value value) -> Value {
-      value = rewriter.create<tensor::ReshapeOp>(loc, narrowType, value, flatShape);
+      value =
+          rewriter.create<tensor::ReshapeOp>(loc, narrowType, value, flatShape);
       return castPermutationStorage(value, wideType, loc, rewriter);
     };
     lhs = extend(lhs);
@@ -2125,13 +2160,18 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   }
   auto finish = [&](Value value) {
     if (narrow) {
-      Value flatShape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({2 * count}));
+      Value flatShape = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getI64TensorAttr({2 * count}));
       auto wideFlatType = RankedTensorType::get({2 * count}, elemType);
-      auto narrowFlatType = RankedTensorType::get({2 * count}, originalResultType.getElementType());
-      value = rewriter.create<tensor::ReshapeOp>(loc, wideFlatType, value, flatShape);
+      auto narrowFlatType = RankedTensorType::get(
+          {2 * count}, originalResultType.getElementType());
+      value = rewriter.create<tensor::ReshapeOp>(loc, wideFlatType, value,
+                                                 flatShape);
       value = castPermutationStorage(value, narrowFlatType, loc, rewriter);
-      Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(originalResultType.getShape()));
-      value = rewriter.create<tensor::ReshapeOp>(loc, originalResultType, value, shape);
+      Value shape = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getI64TensorAttr(originalResultType.getShape()));
+      value = rewriter.create<tensor::ReshapeOp>(loc, originalResultType, value,
+                                                 shape);
     }
     if (bitwise)
       value = rewriter.create<arith::BitcastOp>(loc, originalResultType, value);
@@ -2159,22 +2199,23 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
     Value one = rewriter.create<arith::ConstantIndexOp>(loc, 1);
     Value a = rewriter.create<tensor::ExtractOp>(loc, elemType, lhs, zero);
     Value b = rewriter.create<tensor::ExtractOp>(loc, elemType, rhs, zero);
-    Value empty = rewriter.create<tensor::EmptyOp>(loc, flatResultType.getShape(), elemType);
+    Value empty = rewriter.create<tensor::EmptyOp>(
+        loc, flatResultType.getShape(), elemType);
     Value first = rewriter.create<tensor::InsertOp>(loc, a, empty, zero);
     Value second = rewriter.create<tensor::InsertOp>(loc, b, first, one);
     finish(reshape(second, resultType.getShape()));
     return success();
   }
   auto packedType = RankedTensorType::get({2 * count}, elemType);
-  Value packed = rewriter.create<tensor::ConcatOp>(
-      loc, packedType, 0, ValueRange{lhs, rhs});
+  Value packed = rewriter.create<tensor::ConcatOp>(loc, packedType, 0,
+                                                   ValueRange{lhs, rhs});
   Value channels = reshape(packed, {2, count});
   auto interleavedType = RankedTensorType::get({count, 2}, elemType);
-  Value interleaved = tryPackedVectorTranspose(
-      channels, interleavedType, {1, 0}, loc, rewriter);
+  Value interleaved = tryPackedVectorTranspose(channels, interleavedType,
+                                               {1, 0}, loc, rewriter);
   if (!interleaved)
-    interleaved = ConverterUtils::getTransposedValue(
-        channels, loc, rewriter, {1, 0});
+    interleaved =
+        ConverterUtils::getTransposedValue(channels, loc, rewriter, {1, 0});
   finish(reshape(interleaved, resultType.getShape()));
   return success();
 }
@@ -2308,7 +2349,8 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
       SmallVector<Value> results;
       for (auto &channel : channels)
         results.push_back(rewriter.create<arith::ConstantOp>(
-            loc, DenseElementsAttr::get(outType, ArrayRef<Attribute>(channel))));
+            loc,
+            DenseElementsAttr::get(outType, ArrayRef<Attribute>(channel))));
       rewriter.replaceOp(op, results);
       return success();
     }
@@ -2318,40 +2360,52 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
   bool word = element.isF16() || element.isBF16() || element.isF32() ||
               element.isInteger(16) || element.isInteger(32);
   bool denseLoad = word && inputType.getRank() == 2 &&
-      op->hasAttr("flagtree.dense_native_permutation");
-  if (supportsStructuredPermutation(op) && (word || narrow) && !inputType.getEncoding() && !outType.getEncoding() &&
+                   op->hasAttr("flagtree.dense_native_permutation");
+  if (supportsStructuredPermutation(op) && (word || narrow) &&
+      !inputType.getEncoding() && !outType.getEncoding() &&
       (narrow || !denseLoad)) {
     int64_t count = outType.getNumElements();
     Type storageElement = narrow ? rewriter.getI16Type() : element;
     if (narrow) {
       auto narrowFlatType = RankedTensorType::get({2 * count}, element);
       auto wideType = RankedTensorType::get({2 * count}, storageElement);
-      Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr({2 * count}));
-      input = rewriter.create<tensor::ReshapeOp>(loc, narrowFlatType, input, shape);
+      Value shape = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getI64TensorAttr({2 * count}));
+      input =
+          rewriter.create<tensor::ReshapeOp>(loc, narrowFlatType, input, shape);
       input = castPermutationStorage(input, wideType, loc, rewriter);
     }
     auto reshape = [&](Value value, ArrayRef<int64_t> shape) -> Value {
       auto type = RankedTensorType::get(shape, storageElement);
       if (value.getType() == type)
         return value;
-      Value sizes = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(shape));
+      Value sizes = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getI64TensorAttr(shape));
       return rewriter.create<tensor::ReshapeOp>(loc, type, value, sizes);
     };
     Value flat = reshape(input, {2 * count});
     auto flatType = RankedTensorType::get({count}, storageElement);
     auto indexType = RankedTensorType::get({count}, rewriter.getI32Type());
-    Value lhs = rewriter.create<bufferization::AllocTensorOp>(loc, flatType, ValueRange{});
-    Value rhs = rewriter.create<bufferization::AllocTensorOp>(loc, flatType, ValueRange{});
-    Value addresses = rewriter.create<bufferization::AllocTensorOp>(loc, indexType, ValueRange{});
-    StringRef suffix = storageElement.isF16() ? "half" : storageElement.isBF16() ? "bf16" :
-                       storageElement.isF32() ? "float" : storageElement.isInteger(16) ? "int16" : "int32";
+    Value lhs = rewriter.create<bufferization::AllocTensorOp>(loc, flatType,
+                                                              ValueRange{});
+    Value rhs = rewriter.create<bufferization::AllocTensorOp>(loc, flatType,
+                                                              ValueRange{});
+    Value addresses = rewriter.create<bufferization::AllocTensorOp>(
+        loc, indexType, ValueRange{});
+    StringRef suffix = storageElement.isF16()         ? "half"
+                       : storageElement.isBF16()      ? "bf16"
+                       : storageElement.isF32()       ? "float"
+                       : storageElement.isInteger(16) ? "int16"
+                                                      : "int32";
     auto split = rewriter.create<hivm::CustomOp>(
-        loc, TypeRange{flatType, flatType, indexType}, "flagtree.structured_split",
-        ValueRange{flat}, ValueRange{lhs, rhs, addresses}, ValueRange{});
+        loc, TypeRange{flatType, flatType, indexType},
+        "flagtree.structured_split", ValueRange{flat},
+        ValueRange{lhs, rhs, addresses}, ValueRange{});
     split.setCoreType(hivm::TCoreType::VECTOR);
     split.setPipe(hivm::PIPE::PIPE_V);
     split.setVFMode(hivm::VFMode::SIMD);
-    split->setAttr("symbol", rewriter.getStringAttr(("custom_flagtree_split_" + suffix).str()));
+    split->setAttr("symbol", rewriter.getStringAttr(
+                                 ("custom_flagtree_split_" + suffix).str()));
     split->setAttr("max_rank", rewriter.getI64IntegerAttr(1));
     split->setAttr("no_side_effect", rewriter.getUnitAttr());
     SmallVector<Value> results;
@@ -2360,8 +2414,10 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
       if (narrow) {
         auto narrowFlatType = RankedTensorType::get({count}, element);
         result = castPermutationStorage(result, narrowFlatType, loc, rewriter);
-        Value shape = rewriter.create<arith::ConstantOp>(loc, rewriter.getI64TensorAttr(outType.getShape()));
-        result = rewriter.create<tensor::ReshapeOp>(loc, outType, result, shape);
+        Value shape = rewriter.create<arith::ConstantOp>(
+            loc, rewriter.getI64TensorAttr(outType.getShape()));
+        result =
+            rewriter.create<tensor::ReshapeOp>(loc, outType, result, shape);
       } else {
         result = reshape(result, outType.getShape());
       }

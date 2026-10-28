@@ -85,10 +85,10 @@
 #include "tle/dsa/dialect/include/Conversion/TleToLinalg/MathConverter.h"
 #endif
 
+#include "bishengir/Dialect/HACC/IR/HACC.h"
 #include <cassert>
 #include <cstdint>
 #include <optional>
-#include "bishengir/Dialect/HACC/IR/HACC.h"
 
 #define DEBUG_TYPE "triton-to-linalg"
 
@@ -824,7 +824,8 @@ struct NormalizeUnitCopyStride : OpRewritePattern<memref::CopyOp> {
     auto normalize = [&](Value value) -> Value {
       auto type = dyn_cast<MemRefType>(value.getType());
       if (!type || type.getRank() != 1 || type.getDimSize(0) != 1 ||
-          (!type.getLayout().isIdentity() && !isa<StridedLayoutAttr>(type.getLayout())))
+          (!type.getLayout().isIdentity() &&
+           !isa<StridedLayoutAttr>(type.getLayout())))
         return value;
 #ifdef __LLVM_MAJOR_VERSION_22_COMPATIBLE__
       auto [strides, offset] = type.getStridesAndOffset();
@@ -833,11 +834,13 @@ struct NormalizeUnitCopyStride : OpRewritePattern<memref::CopyOp> {
 #endif
       if (offset != 0 || strides[0] == 1)
         return value;
-      auto normalizedType = MemRefType::get(
-          {1}, type.getElementType(), MemRefLayoutAttrInterface{}, type.getMemorySpace());
+      auto normalizedType =
+          MemRefType::get({1}, type.getElementType(),
+                          MemRefLayoutAttrInterface{}, type.getMemorySpace());
       SmallVector<OpFoldResult> ones{rewriter.getIndexAttr(1)};
       return rewriter.create<memref::ReinterpretCastOp>(
-          op.getLoc(), normalizedType, value, rewriter.getIndexAttr(0), ones, ones);
+          op.getLoc(), normalizedType, value, rewriter.getIndexAttr(0), ones,
+          ones);
     };
     Value source = normalize(op.getSource());
     Value target = normalize(op.getTarget());
@@ -907,7 +910,8 @@ struct SplitBeforeTranspose : OpRewritePattern<triton::SplitOp> {
     int64_t axis = order.back();
     SmallVector<int64_t> sliceShape(baseType.getShape());
     sliceShape[axis] /= 2;
-    auto sliceType = RankedTensorType::get(sliceShape, baseType.getElementType());
+    auto sliceType =
+        RankedTensorType::get(sliceShape, baseType.getElementType());
     SmallVector<OpFoldResult> offsets(rank, rewriter.getIndexAttr(0));
     SmallVector<OpFoldResult> sizes, strides(rank, rewriter.getIndexAttr(1));
     for (auto n : sliceShape)
@@ -915,7 +919,8 @@ struct SplitBeforeTranspose : OpRewritePattern<triton::SplitOp> {
     strides[axis] = rewriter.getIndexAttr(2);
     SmallVector<int64_t> selectedShape(transType.getShape());
     selectedShape.back() /= 2;
-    auto selectedType = RankedTensorType::get(selectedShape, baseType.getElementType());
+    auto selectedType =
+        RankedTensorType::get(selectedShape, baseType.getElementType());
     auto resultType = cast<RankedTensorType>(op.getOutLHS().getType());
     SmallVector<Value> results;
     for (int channel = 0; channel < 2; ++channel) {
@@ -1020,16 +1025,19 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
       GreedySimplifyRegionLevel::Disabled);
   RewritePatternSet inversePatterns(&getContext());
   inversePatterns.add<FoldJoinOfSplit>(&getContext());
-  if (failed(applyPatternsGreedily(moduleOp, std::move(inversePatterns), permutationConfig))) {
+  if (failed(applyPatternsGreedily(moduleOp, std::move(inversePatterns),
+                                   permutationConfig))) {
     signalPassFailure();
     return;
   }
-  auto permutationTarget = moduleOp->getAttrOfType<hacc::TargetAttr>("hacc.target");
+  auto permutationTarget =
+      moduleOp->getAttrOfType<hacc::TargetAttr>("hacc.target");
   if (!compileOn91095Flag && permutationTarget &&
       permutationTarget.getTarget().getValue().starts_with("Ascend910B")) {
     RewritePatternSet splitPatterns(&getContext());
     splitPatterns.add<SplitBeforeTranspose>(&getContext());
-    if (failed(applyPatternsGreedily(moduleOp, std::move(splitPatterns), permutationConfig))) {
+    if (failed(applyPatternsGreedily(moduleOp, std::move(splitPatterns),
+                                     permutationConfig))) {
       signalPassFailure();
       return;
     }
@@ -1420,7 +1428,8 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
       permutationTarget.getTarget().getValue().starts_with("Ascend910B")) {
     RewritePatternSet copyPatterns(&getContext());
     copyPatterns.add<NormalizeUnitCopyStride>(&getContext());
-    if (failed(applyPatternsGreedily(moduleOp, std::move(copyPatterns), permutationConfig))) {
+    if (failed(applyPatternsGreedily(moduleOp, std::move(copyPatterns),
+                                     permutationConfig))) {
       signalPassFailure();
       return;
     }
