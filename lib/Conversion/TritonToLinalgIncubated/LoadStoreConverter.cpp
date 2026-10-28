@@ -345,7 +345,9 @@ LoadConverter::matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
   auto memRefShape = memRefType.getShape();
   auto memRefElementType = memRefType.getElementType();
 
-  if (!mask && op.getBoundaryCheck().empty() && !op.getIsVolatile() &&
+  auto logicalType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (logicalType && !logicalType.getEncoding() && !mask &&
+      op.getBoundaryCheck().empty() && !op.getIsVolatile() &&
       op.getCache() == triton::CacheModifier::NONE &&
       op.getEvict() == triton::EvictionPolicy::NORMAL &&
       !op->hasAttr(ConverterUtils::discreteAttrName) &&

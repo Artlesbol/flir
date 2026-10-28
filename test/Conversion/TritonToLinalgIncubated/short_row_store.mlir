@@ -264,3 +264,96 @@ module attributes {hacc.target = #hacc.target<"Ascend910A">} {
   tt.return
  }
 }
+
+// -----
+
+// CHECK-LABEL: func.func @volatile_load(
+// CHECK-NOT: custom_flagtree_short_row_load_
+// CHECK: memref.copy
+// CHECK-NOT: custom_flagtree_short_row_load_
+// CHECK: symbol = "custom_flagtree_short_row_store_float"
+// CHECK: return
+module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+ tt.func public @volatile_load(%out: !tt.ptr<f32>, %input: !tt.ptr<f32>) {
+  %r = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+  %c = tt.make_range {start = 0 : i32, end = 4 : i32} : tensor<4xi32>
+  %s = arith.constant dense<1024> : tensor<32xi32>
+  %r0 = arith.muli %r, %s : tensor<32xi32>
+  %r1 = tt.expand_dims %r0 {axis = 1 : i32} : tensor<32xi32> -> tensor<32x1xi32>
+  %c1 = tt.expand_dims %c {axis = 0 : i32} : tensor<4xi32> -> tensor<1x4xi32>
+  %rr = tt.broadcast %r1 : tensor<32x1xi32> -> tensor<32x4xi32>
+  %cc = tt.broadcast %c1 : tensor<1x4xi32> -> tensor<32x4xi32>
+  %off = arith.addi %rr, %cc : tensor<32x4xi32>
+  %p = tt.splat %out : !tt.ptr<f32> -> tensor<32x4x!tt.ptr<f32>>
+  %ptr = tt.addptr %p, %off : tensor<32x4x!tt.ptr<f32>>, tensor<32x4xi32>
+  %ip = tt.splat %input : !tt.ptr<f32> -> tensor<32x4x!tt.ptr<f32>>
+  %iptr = tt.addptr %ip, %off : tensor<32x4x!tt.ptr<f32>>, tensor<32x4xi32>
+  %loaded = tt.load %iptr {isVolatile = true} : tensor<32x4x!tt.ptr<f32>>
+  %one = arith.constant dense<1.000000e+00> : tensor<32x4xf32>
+  %value = arith.addf %loaded, %one : tensor<32x4xf32>
+  tt.store %ptr, %value : tensor<32x4x!tt.ptr<f32>>
+  tt.return
+ }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @cached_load(
+// CHECK-NOT: custom_flagtree_short_row_load_
+// CHECK: memref.copy
+// CHECK-NOT: custom_flagtree_short_row_load_
+// CHECK: symbol = "custom_flagtree_short_row_store_float"
+// CHECK: return
+module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+ tt.func public @cached_load(%out: !tt.ptr<f32>, %input: !tt.ptr<f32>) {
+  %r = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+  %c = tt.make_range {start = 0 : i32, end = 4 : i32} : tensor<4xi32>
+  %s = arith.constant dense<1024> : tensor<32xi32>
+  %r0 = arith.muli %r, %s : tensor<32xi32>
+  %r1 = tt.expand_dims %r0 {axis = 1 : i32} : tensor<32xi32> -> tensor<32x1xi32>
+  %c1 = tt.expand_dims %c {axis = 0 : i32} : tensor<4xi32> -> tensor<1x4xi32>
+  %rr = tt.broadcast %r1 : tensor<32x1xi32> -> tensor<32x4xi32>
+  %cc = tt.broadcast %c1 : tensor<1x4xi32> -> tensor<32x4xi32>
+  %off = arith.addi %rr, %cc : tensor<32x4xi32>
+  %p = tt.splat %out : !tt.ptr<f32> -> tensor<32x4x!tt.ptr<f32>>
+  %ptr = tt.addptr %p, %off : tensor<32x4x!tt.ptr<f32>>, tensor<32x4xi32>
+  %ip = tt.splat %input : !tt.ptr<f32> -> tensor<32x4x!tt.ptr<f32>>
+  %iptr = tt.addptr %ip, %off : tensor<32x4x!tt.ptr<f32>>, tensor<32x4xi32>
+  %loaded = tt.load %iptr {cache = 1 : i32} : tensor<32x4x!tt.ptr<f32>>
+  %one = arith.constant dense<1.000000e+00> : tensor<32x4xf32>
+  %value = arith.addf %loaded, %one : tensor<32x4xf32>
+  tt.store %ptr, %value : tensor<32x4x!tt.ptr<f32>>
+  tt.return
+ }
+}
+
+// -----
+
+// CHECK-LABEL: func.func @eviction_hint_load(
+// CHECK-NOT: custom_flagtree_short_row_load_
+// CHECK: memref.copy
+// CHECK-NOT: custom_flagtree_short_row_load_
+// CHECK: symbol = "custom_flagtree_short_row_store_float"
+// CHECK: return
+module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+ tt.func public @eviction_hint_load(%out: !tt.ptr<f32>, %input: !tt.ptr<f32>) {
+  %r = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+  %c = tt.make_range {start = 0 : i32, end = 4 : i32} : tensor<4xi32>
+  %s = arith.constant dense<1024> : tensor<32xi32>
+  %r0 = arith.muli %r, %s : tensor<32xi32>
+  %r1 = tt.expand_dims %r0 {axis = 1 : i32} : tensor<32xi32> -> tensor<32x1xi32>
+  %c1 = tt.expand_dims %c {axis = 0 : i32} : tensor<4xi32> -> tensor<1x4xi32>
+  %rr = tt.broadcast %r1 : tensor<32x1xi32> -> tensor<32x4xi32>
+  %cc = tt.broadcast %c1 : tensor<1x4xi32> -> tensor<32x4xi32>
+  %off = arith.addi %rr, %cc : tensor<32x4xi32>
+  %p = tt.splat %out : !tt.ptr<f32> -> tensor<32x4x!tt.ptr<f32>>
+  %ptr = tt.addptr %p, %off : tensor<32x4x!tt.ptr<f32>>, tensor<32x4xi32>
+  %ip = tt.splat %input : !tt.ptr<f32> -> tensor<32x4x!tt.ptr<f32>>
+  %iptr = tt.addptr %ip, %off : tensor<32x4x!tt.ptr<f32>>, tensor<32x4xi32>
+  %loaded = tt.load %iptr {evict = 1 : i32} : tensor<32x4x!tt.ptr<f32>>
+  %one = arith.constant dense<1.000000e+00> : tensor<32x4xf32>
+  %value = arith.addf %loaded, %one : tensor<32x4xf32>
+  tt.store %ptr, %value : tensor<32x4x!tt.ptr<f32>>
+  tt.return
+ }
+}
