@@ -2547,13 +2547,14 @@ LogicalResult DeviceAssertConverter::matchAndRewrite(
   return success();
 }
 
-// CANN's Vector/Cube junction analysis does not trace a tensor bitcast view.
+// CANN's Vector/Cube junction analysis does not trace tensor bitcast views or
+// values produced by explicitly Vector-only custom operations.
 // Keep vector side consumers in UB, and give only the Cube consumer a separate
 // FP32 L1 buffer, populated through the native per-program GM workspace path.
 // An explicit workspace also prevents early empty-tensor CSE from merging the
 // GM staging buffer with a vector or L1 destination.
-static Value legalizeBitcastDotOperand(Value value, Operation *dot,
-                                       ConversionPatternRewriter &rewriter) {
+static Value legalizeVectorDotOperand(Value value, Operation *dot,
+                                      ConversionPatternRewriter &rewriter) {
   auto type = dyn_cast<RankedTensorType>(value.getType());
   if (!isAscend910B(dot) || !type || type.getEncoding() ||
       !type.hasStaticShape() || !type.getElementType().isF32())
@@ -2561,7 +2562,7 @@ static Value legalizeBitcastDotOperand(Value value, Operation *dot,
 
   SmallVector<Value> worklist{value};
   llvm::SmallPtrSet<Operation *, 16> visited;
-  bool hasBitcast = false;
+  bool needsTransfer = false;
   while (!worklist.empty()) {
     auto *producer = worklist.pop_back_val().getDefiningOp();
     if (!producer || !visited.insert(producer).second)
@@ -2569,24 +2570,30 @@ static Value legalizeBitcastDotOperand(Value value, Operation *dot,
     // Indirect producers may not have been converted yet: an already-legal
     // arith op can still use tt.bitcast while the dot pattern is visited.
     if (isa<arith::BitcastOp, triton::BitcastOp>(producer)) {
-      hasBitcast = true;
+      needsTransfer = true;
       break;
     }
+    if (auto custom = dyn_cast<hivm::CustomOp>(producer)) {
+      if (custom.getCoreType() == hivm::TCoreType::VECTOR) {
+        needsTransfer = true;
+        break;
+      }
+    }
     if (isa<tensor::CastOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
-            tensor::ExtractSliceOp, linalg::TransposeOp, triton::TransOp,
-            triton::ReshapeOp, triton::ExpandDimsOp, triton::BroadcastOp>(
-            producer)) {
+            tensor::ReshapeOp, tensor::ExtractSliceOp, linalg::TransposeOp,
+            triton::TransOp, triton::ReshapeOp, triton::ExpandDimsOp,
+            triton::BroadcastOp>(producer)) {
       worklist.push_back(producer->getOperand(0));
     } else if (producer->hasTrait<OpTrait::Elementwise>()) {
       // Later CANN folds may remove an intervening +0, *1, or select. Establish
-      // the same valid boundary for bitcast-derived elementwise expressions,
+      // the same valid boundary for Vector-derived elementwise expressions,
       // without trying to predict those folds or changing their FP semantics.
       for (Value operand : producer->getOperands())
         if (isa<RankedTensorType>(operand.getType()))
           worklist.push_back(operand);
     }
   }
-  if (!hasBitcast)
+  if (!needsTransfer)
     return value;
 
   constexpr StringLiteral transferMarker = "flagtree.vector_to_cube";
@@ -2625,8 +2632,8 @@ static Value legalizeBitcastDotOperand(Value value, Operation *dot,
 LogicalResult
 MatmulConverter::matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
                                  ConversionPatternRewriter &rewriter) const {
-  auto opa = legalizeBitcastDotOperand(adaptor.getA(), op, rewriter);
-  auto opb = legalizeBitcastDotOperand(adaptor.getB(), op, rewriter);
+  auto opa = legalizeVectorDotOperand(adaptor.getA(), op, rewriter);
+  auto opb = legalizeVectorDotOperand(adaptor.getB(), op, rewriter);
   auto opc = adaptor.getC();
   auto dstType = cast<RankedTensorType>(op.getType());
   auto elemTy = dstType.getElementType();
