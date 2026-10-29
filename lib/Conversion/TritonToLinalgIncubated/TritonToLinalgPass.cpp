@@ -53,6 +53,7 @@
 #include "bishengir/Dialect/Annotation/IR/Annotation.h"
 #endif
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/MemRefExt/IR/MemRefExt.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -453,13 +454,13 @@ void TritonToLinalgIncubatedPass::convertTTFunc(triton::FuncOp func,
 
 void TritonToLinalgIncubatedPass::addDynamicLegal(
     ConversionTarget &target, TritonTypeConverter &tritonTypeConverter) {
-  target.addLegalDialect<func::FuncDialect, arith::ArithDialect,
-                         math::MathDialect, linalg::LinalgDialect,
-                         affine::AffineDialect, scf::SCFDialect,
-                         cf::ControlFlowDialect, tensor::TensorDialect,
-                         LLVM::LLVMDialect, bufferization::BufferizationDialect,
-                         memref::MemRefDialect, annotation::AnnotationDialect,
-                         hivm::HIVMDialect, hfusion::HFusionDialect>();
+  target.addLegalDialect<
+      func::FuncDialect, arith::ArithDialect, math::MathDialect,
+      linalg::LinalgDialect, affine::AffineDialect, scf::SCFDialect,
+      cf::ControlFlowDialect, tensor::TensorDialect, LLVM::LLVMDialect,
+      bufferization::BufferizationDialect, memref::MemRefDialect,
+      annotation::AnnotationDialect, hivm::HIVMDialect, hfusion::HFusionDialect,
+      bishengir::memref_ext::MemRefExtDialect>();
 
   // add legal dialect on condition
   target.addLegalOp<ModuleOp>();
@@ -695,7 +696,8 @@ void TritonToLinalgIncubatedPass::getDependentDialects(
                   linalg::LinalgDialect, affine::AffineDialect, scf::SCFDialect,
                   tensor::TensorDialect, bufferization::BufferizationDialect,
                   memref::MemRefDialect, hfusion::HFusionDialect,
-                  hivm::HIVMDialect, annotation::AnnotationDialect>();
+                  hivm::HIVMDialect, annotation::AnnotationDialect,
+                  bishengir::memref_ext::MemRefExtDialect>();
 }
 
 LogicalResult

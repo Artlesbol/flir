@@ -39,6 +39,7 @@
 #include <utility>
 
 #include "bishengir/Dialect/HACC/IR/HACC.h"
+#include "bishengir/Dialect/HIVM/Utils/Utils.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -191,7 +192,7 @@ BitcastConverter::matchAndRewrite(triton::BitcastOp op, OpAdaptor adaptor,
   return success();
 }
 
-static bool supportsStructuredPermutation(Operation *op) {
+static bool isAscend910B(Operation *op) {
   auto module = op->getParentOfType<ModuleOp>();
   if (!module || compileOn91095Flag)
     return false;
@@ -249,8 +250,8 @@ static Value tryPackedVectorTranspose(Value src, RankedTensorType resultType,
   auto srcType = dyn_cast<RankedTensorType>(src.getType());
   // The packaged primitive currently targets dav-c220. Keep the existing
   // lowering on the separately selected 910_95 architecture.
-  if (!supportsStructuredPermutation(src.getParentBlock()->getParentOp()) ||
-      !srcType || !srcType.hasStaticShape() || srcType.getEncoding() ||
+  if (!isAscend910B(src.getParentBlock()->getParentOp()) || !srcType ||
+      !srcType.hasStaticShape() || srcType.getEncoding() ||
       resultType.getEncoding() || order.empty())
     return {};
   SmallVector<int> sourceAxes, resultAxes;
@@ -2086,7 +2087,7 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   // explicit A/B policy; it still requires the original dense graph proof.
   bool preferNative = lowering == "native";
   bool denseNative =
-      preferNative && supportsStructuredPermutation(op) && supportedElement &&
+      preferNative && isAscend910B(op) && supportedElement &&
       !originalElement.isInteger(8) && inputType.hasStaticShape() &&
       !inputType.getEncoding() && !resultType.getEncoding() &&
       inputType.getRank() == 1 &&
@@ -2096,9 +2097,9 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   // Admit the complete packed algorithm only within its index-buffer budget.
   // In particular, do not widen a large byte join and then send it to a padded
   // native transpose: that consumes far more UB than the existing interleave.
-  if (!supportsStructuredPermutation(op) || !supportedElement ||
-      !inputType.hasStaticShape() || inputType.getNumElements() > 2048 ||
-      inputType.getEncoding() || resultType.getEncoding() || denseNative) {
+  if (!isAscend910B(op) || !supportedElement || !inputType.hasStaticShape() ||
+      inputType.getNumElements() > 2048 || inputType.getEncoding() ||
+      resultType.getEncoding() || denseNative) {
     auto storedType = resultType;
     bool rawBits = denseNative && isa<FloatType>(originalElement);
     if (rawBits) {
@@ -2362,9 +2363,8 @@ SplitConverter::matchAndRewrite(triton::SplitOp op, OpAdaptor adaptor,
               element.isInteger(16) || element.isInteger(32);
   bool denseLoad = word && inputType.getRank() == 2 &&
                    op->hasAttr("flagtree.dense_native_permutation");
-  if (supportsStructuredPermutation(op) && (word || narrow) &&
-      !inputType.getEncoding() && !outType.getEncoding() &&
-      (narrow || !denseLoad)) {
+  if (isAscend910B(op) && (word || narrow) && !inputType.getEncoding() &&
+      !outType.getEncoding() && (narrow || !denseLoad)) {
     int64_t count = outType.getNumElements();
     Type storageElement = narrow ? rewriter.getI16Type() : element;
     if (narrow) {
@@ -2546,11 +2546,65 @@ LogicalResult DeviceAssertConverter::matchAndRewrite(
   return success();
 }
 
+// CANN's Vector/Cube junction analysis does not trace a tensor bitcast view.
+// Keep vector side consumers in UB, and give only the Cube consumer a separate
+// FP32 L1 buffer, populated through the native per-program GM workspace path.
+// An explicit workspace also prevents early empty-tensor CSE from merging the
+// GM staging buffer with a vector or L1 destination.
+static Value legalizeBitcastDotOperand(Value value, Operation *dot,
+                                       ConversionPatternRewriter &rewriter) {
+  auto type = dyn_cast<RankedTensorType>(value.getType());
+  if (!isAscend910B(dot) || !type || type.getEncoding() ||
+      !type.hasStaticShape() || !type.getElementType().isF32())
+    return value;
+
+  Value source = value;
+  while (auto *producer = source.getDefiningOp()) {
+    if (isa<tensor::CastOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
+            tensor::ExtractSliceOp, linalg::TransposeOp>(producer)) {
+      source = producer->getOperand(0);
+      continue;
+    }
+    break;
+  }
+  auto bitcast = source.getDefiningOp<arith::BitcastOp>();
+  if (!bitcast)
+    return value;
+
+  constexpr StringLiteral transferMarker = "flagtree.vector_to_cube";
+  // Repeated dot uses of the same computed value share its transfer. Restrict
+  // reuse to this block and an earlier compiler-created pair: no motion across
+  // control flow, user stores, or potentially different workspace lifetimes.
+  for (Operation *user : value.getUsers()) {
+    auto store = dyn_cast<hivm::StoreOp>(user);
+    if (!store || !store->hasAttr(transferMarker))
+      continue;
+    for (Operation *reader : store->getResult(0).getUsers()) {
+      auto load = dyn_cast<hivm::LoadOp>(reader);
+      if (load && load->getBlock() == dot->getBlock() &&
+          load->isBeforeInBlock(dot) && load->getResult(0).getType() == type)
+        return load->getResult(0);
+    }
+  }
+
+  auto loc = dot->getLoc();
+  Value workspace = hivm::getLocalWorkSpaceTensor(
+      rewriter, loc, type.getShape(), {}, type.getElementType());
+  auto store =
+      rewriter.create<hivm::StoreOp>(loc, TypeRange{type}, value, workspace);
+  store->setAttr(transferMarker, rewriter.getUnitAttr());
+  Value l1 =
+      rewriter.create<bufferization::AllocTensorOp>(loc, type, ValueRange{});
+  return rewriter
+      .create<hivm::LoadOp>(loc, TypeRange{type}, store->getResult(0), l1)
+      ->getResult(0);
+}
+
 LogicalResult
 MatmulConverter::matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
                                  ConversionPatternRewriter &rewriter) const {
-  auto opa = adaptor.getA();
-  auto opb = adaptor.getB();
+  auto opa = legalizeBitcastDotOperand(adaptor.getA(), op, rewriter);
+  auto opb = legalizeBitcastDotOperand(adaptor.getB(), op, rewriter);
   auto opc = adaptor.getC();
   auto dstType = cast<RankedTensorType>(op.getType());
   auto elemTy = dstType.getElementType();
