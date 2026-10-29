@@ -2636,7 +2636,8 @@ void legalizeVectorDotOperands(ModuleOp module) {
       return;
     rewriter.setInsertionPoint(op);
     for (unsigned i = 0; i < 2; ++i)
-      op->setOperand(i, legalizeVectorDotOperand(op->getOperand(i), op, rewriter));
+      op->setOperand(i,
+                     legalizeVectorDotOperand(op->getOperand(i), op, rewriter));
   });
 }
 
