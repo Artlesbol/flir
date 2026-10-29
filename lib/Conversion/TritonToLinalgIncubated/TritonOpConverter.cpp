@@ -2566,12 +2566,16 @@ static Value legalizeBitcastDotOperand(Value value, Operation *dot,
     auto *producer = worklist.pop_back_val().getDefiningOp();
     if (!producer || !visited.insert(producer).second)
       continue;
-    if (isa<arith::BitcastOp>(producer)) {
+    // Indirect producers may not have been converted yet: an already-legal
+    // arith op can still use tt.bitcast while the dot pattern is visited.
+    if (isa<arith::BitcastOp, triton::BitcastOp>(producer)) {
       hasBitcast = true;
       break;
     }
     if (isa<tensor::CastOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
-            tensor::ExtractSliceOp, linalg::TransposeOp>(producer)) {
+            tensor::ExtractSliceOp, linalg::TransposeOp, triton::TransOp,
+            triton::ReshapeOp, triton::ExpandDimsOp, triton::BroadcastOp>(
+            producer)) {
       worklist.push_back(producer->getOperand(0));
     } else if (producer->hasTrait<OpTrait::Elementwise>()) {
       // Later CANN folds may remove an intervening +0, *1, or select. Establish

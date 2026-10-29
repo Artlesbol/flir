@@ -170,7 +170,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 // CHECK: linalg.matmul
 // CHECK-NOT: memref_ext.alloc_workspace
 // CHECK: return
-module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+module attributes {flagtree.auto_blockify = false, hacc.target = #hacc.target<"Ascend910B4">} {
  tt.func public @rhs_bitcast_add_zero(%X: !tt.ptr<f32>, %W: !tt.ptr<f32>, %Y: !tt.ptr<f32>, %Side: !tt.ptr<f32>) {
   %x_r = tt.make_range {start = 0 : i32, end = 16 : i32} : tensor<16xi32>
   %x_c = tt.make_range {start = 0 : i32, end = 64 : i32} : tensor<64xi32>
