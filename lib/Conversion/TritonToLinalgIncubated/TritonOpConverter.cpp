@@ -39,7 +39,7 @@
 #include <utility>
 
 #include "bishengir/Dialect/HACC/IR/HACC.h"
-#include "bishengir/Dialect/HIVM/Utils/Utils.h"
+#include "bishengir/Dialect/MemRefExt/IR/MemRefExt.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -2588,8 +2588,12 @@ static Value legalizeBitcastDotOperand(Value value, Operation *dot,
   }
 
   auto loc = dot->getLoc();
-  Value workspace = hivm::getLocalWorkSpaceTensor(
-      rewriter, loc, type.getShape(), {}, type.getElementType());
+  auto workspaceType = MemRefType::get(type.getShape(), type.getElementType());
+  Value workspaceBuffer =
+      rewriter.create<bishengir::memref_ext::AllocWorkspaceOp>(
+          loc, workspaceType, Value(), ValueRange{}, ValueRange{});
+  Value workspace = rewriter.create<bufferization::ToTensorOp>(
+      loc, type, workspaceBuffer, true, true);
   auto store =
       rewriter.create<hivm::StoreOp>(loc, TypeRange{type}, value, workspace);
   store->setAttr(transferMarker, rewriter.getUnitAttr());
