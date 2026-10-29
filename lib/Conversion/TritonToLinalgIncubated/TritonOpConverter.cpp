@@ -28,6 +28,7 @@
 #include "incubated/Conversion/UtilsIncubated/Utils.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVectorExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -2558,17 +2559,30 @@ static Value legalizeBitcastDotOperand(Value value, Operation *dot,
       !type.hasStaticShape() || !type.getElementType().isF32())
     return value;
 
-  Value source = value;
-  while (auto *producer = source.getDefiningOp()) {
+  SmallVector<Value> worklist{value};
+  llvm::SmallPtrSet<Operation *, 16> visited;
+  bool hasBitcast = false;
+  while (!worklist.empty()) {
+    auto *producer = worklist.pop_back_val().getDefiningOp();
+    if (!producer || !visited.insert(producer).second)
+      continue;
+    if (isa<arith::BitcastOp>(producer)) {
+      hasBitcast = true;
+      break;
+    }
     if (isa<tensor::CastOp, tensor::CollapseShapeOp, tensor::ExpandShapeOp,
             tensor::ExtractSliceOp, linalg::TransposeOp>(producer)) {
-      source = producer->getOperand(0);
-      continue;
+      worklist.push_back(producer->getOperand(0));
+    } else if (producer->hasTrait<OpTrait::Elementwise>()) {
+      // Later CANN folds may remove an intervening +0, *1, or select. Establish
+      // the same valid boundary for bitcast-derived elementwise expressions,
+      // without trying to predict those folds or changing their FP semantics.
+      for (Value operand : producer->getOperands())
+        if (isa<RankedTensorType>(operand.getType()))
+          worklist.push_back(operand);
     }
-    break;
   }
-  auto bitcast = source.getDefiningOp<arith::BitcastOp>();
-  if (!bitcast)
+  if (!hasBitcast)
     return value;
 
   constexpr StringLiteral transferMarker = "flagtree.vector_to_cube";
