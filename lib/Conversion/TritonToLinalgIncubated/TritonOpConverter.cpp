@@ -2554,7 +2554,7 @@ LogicalResult DeviceAssertConverter::matchAndRewrite(
 // An explicit workspace also prevents early empty-tensor CSE from merging the
 // GM staging buffer with a vector or L1 destination.
 static Value legalizeVectorDotOperand(Value value, Operation *dot,
-                                      ConversionPatternRewriter &rewriter) {
+                                      RewriterBase &rewriter) {
   auto type = dyn_cast<RankedTensorType>(value.getType());
   if (!isAscend910B(dot) || !type || type.getEncoding() ||
       !type.hasStaticShape() || !type.getElementType().isF32())
@@ -2629,9 +2629,21 @@ static Value legalizeVectorDotOperand(Value value, Operation *dot,
       ->getResult(0);
 }
 
+void legalizeVectorDotOperands(ModuleOp module) {
+  IRRewriter rewriter(module.getContext());
+  module.walk([&](Operation *op) {
+    if (!isa<linalg::MatmulOp, linalg::BatchMatmulOp>(op))
+      return;
+    rewriter.setInsertionPoint(op);
+    for (unsigned i = 0; i < 2; ++i)
+      op->setOperand(i, legalizeVectorDotOperand(op->getOperand(i), op, rewriter));
+  });
+}
+
 LogicalResult
 MatmulConverter::matchAndRewrite(triton::DotOp op, OpAdaptor adaptor,
                                  ConversionPatternRewriter &rewriter) const {
+  // Preserve source bitcasts before generic elementwise lowering can hide them.
   auto opa = legalizeVectorDotOperand(adaptor.getA(), op, rewriter);
   auto opb = legalizeVectorDotOperand(adaptor.getB(), op, rewriter);
   auto opc = adaptor.getC();
