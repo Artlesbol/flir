@@ -993,7 +993,7 @@ LogicalResult PtrAnalysis::visitOperandUnitReshape(triton::ReshapeOp op,
     return a.dimIndex < b.dimIndex;
   });
   state.updatePtrState(infos, sizes, input.source, input.offset, loc, builder,
-                       input.shouldLinearize);
+                       true); // Rebuild the pointer without the opaque view.
   return success();
 }
 

@@ -49,7 +49,12 @@ public:
     return rewriter.create<Op>(loc, a, b);
   }
   Value shift(Value a, unsigned n) {
-    return n ? binary<arith::ShRUIOp>(a, constant(n)) : a;
+    if (!n)
+      return a;
+    // The installed SDK also lowers tensor shrui as a signed shift. Express
+    // zero filling explicitly; shrsi alone is correct for either bit pattern.
+    return binary<arith::AndIOp>(binary<arith::ShRSIOp>(a, constant(n)),
+                                 constant(0xffffffffu >> n));
   }
   Value highProduct(Value a, uint32_t multiplier) {
     Value low = binary<arith::AndIOp>(a, constant(0xffff));

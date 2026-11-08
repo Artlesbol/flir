@@ -142,6 +142,8 @@ LogicalResult MaskState::parse(Value operand, const Location loc,
     return this->parseSplat(op, loc, builder);
   } else if (auto op = operand.getDefiningOp<triton::ExpandDimsOp>()) {
     return this->parseExpandDims(op, loc, builder);
+  } else if (auto op = operand.getDefiningOp<triton::ReshapeOp>()) {
+    return this->parseUnitReshape(op, loc, builder);
   } else if (auto op = operand.getDefiningOp<arith::ExtSIOp>()) {
     return this->parseExtSI(op, loc, builder);
   } else if (auto op = operand.getDefiningOp<arith::RemSIOp>()) {
@@ -304,6 +306,45 @@ LogicalResult MaskState::parseSplat(triton::SplatOp splatOp, const Location loc,
     }
   }
   this->stateInfo = newStateInfo;
+  return success();
+}
+
+LogicalResult MaskState::parseUnitReshape(triton::ReshapeOp op, Location loc,
+                                          OpBuilder &builder) {
+  auto axes = ConverterUtils::getUnitReshapeSourceAxes(op);
+  if (!axes)
+    return failure();
+  MaskState input;
+  if (failed(input.parse(op.getSrc(), loc, builder)))
+    return failure();
+  auto src = cast<RankedTensorType>(op.getSrc().getType());
+  SmallVector<int64_t> destinationAxes(src.getRank(), -1);
+  SmallVector<dimInfo> infos;
+  for (auto [axis, sourceAxis] : llvm::enumerate(*axes)) {
+    if (sourceAxis < 0)
+      infos.emplace_back(builder.getIndexAttr(0), builder.getIndexAttr(1), axis,
+                         true);
+    else
+      destinationAxes[sourceAxis] = axis;
+  }
+  for (auto info : input.stateInfo) {
+    if (info.dimIndex >= destinationAxes.size())
+      return failure();
+    int64_t axis = destinationAxes[info.dimIndex];
+    if (axis < 0) {
+      // Do not discard a unit-axis comparison that may deactivate the mask.
+      if (info.rhs || !isOne(info.shape) || !isZero(info.offset))
+        return failure();
+      continue;
+    }
+    info.dimIndex = axis;
+    infos.push_back(info);
+  }
+  llvm::stable_sort(infos, [](const dimInfo &a, const dimInfo &b) {
+    return a.dimIndex < b.dimIndex;
+  });
+  stateInfo = std::move(infos);
+  scalar = input.scalar;
   return success();
 }
 

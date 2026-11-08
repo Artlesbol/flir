@@ -96,6 +96,9 @@ struct MaskState {
   LogicalResult parseExpandDims(triton::ExpandDimsOp expandDimsOp,
                                 const Location loc, OpBuilder &builder);
 
+  LogicalResult parseUnitReshape(triton::ReshapeOp op, Location loc,
+                                 OpBuilder &builder);
+
   LogicalResult parseAdd(arith::AddIOp addOp, const Location loc,
                          OpBuilder &builder);
 
