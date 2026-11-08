@@ -82,6 +82,34 @@ static std::optional<int64_t> getConstantOfAttr(const OpFoldResult &arg) {
 
 namespace ConverterUtils {
 
+std::optional<SmallVector<int64_t>>
+getUnitReshapeSourceAxes(triton::ReshapeOp op) {
+  auto src = cast<RankedTensorType>(op.getSrc().getType());
+  auto dst = cast<RankedTensorType>(op.getType());
+  if (op.getAllowReorder() || src.getEncoding() || dst.getEncoding() ||
+      !src.hasStaticShape() || !dst.hasStaticShape() ||
+      src.getElementType() != dst.getElementType())
+    return std::nullopt;
+  SmallVector<int64_t> axes;
+  int64_t sourceAxis = 0;
+  for (int64_t size : dst.getShape()) {
+    if (size == 1) {
+      axes.push_back(-1);
+      continue;
+    }
+    while (sourceAxis < src.getRank() && src.getDimSize(sourceAxis) == 1)
+      ++sourceAxis;
+    if (sourceAxis == src.getRank() || src.getDimSize(sourceAxis) != size)
+      return std::nullopt;
+    axes.push_back(sourceAxis++);
+  }
+  while (sourceAxis < src.getRank() && src.getDimSize(sourceAxis) == 1)
+    ++sourceAxis;
+  if (sourceAxis != src.getRank())
+    return std::nullopt;
+  return axes;
+}
+
 std::optional<int64_t>
 getLastStrideOfReinterpretCastOp(memref::ReinterpretCastOp op) {
   SmallVector<OpFoldResult> mixedStrides = op.getMixedStrides();

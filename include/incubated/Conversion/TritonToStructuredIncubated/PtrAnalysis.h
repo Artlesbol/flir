@@ -144,6 +144,9 @@ public:
                                        PtrState &state, const Location loc,
                                        OpBuilder &builder);
 
+  LogicalResult visitOperandUnitReshape(triton::ReshapeOp op, PtrState &state,
+                                        Location loc, OpBuilder &builder);
+
   LogicalResult visitOperandConstSplat(arith::ConstantOp op, PtrState &state,
                                        const Location loc, OpBuilder &builder);
 

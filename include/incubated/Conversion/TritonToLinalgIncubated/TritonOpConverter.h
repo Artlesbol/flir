@@ -800,6 +800,9 @@ public:
                   ConversionPatternRewriter &rewriter) const override;
 };
 
+bool needsExactIntegerDivision(mlir::Operation *op);
+void populateExactIntegerDivisionPatterns(mlir::RewritePatternSet &patterns);
+
 } // end of namespace TTOpConverters
 
 #endif

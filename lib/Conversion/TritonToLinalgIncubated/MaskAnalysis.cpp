@@ -118,6 +118,8 @@ LogicalResult MaskState::parse(Value operand, const Location &loc,
           [&](auto op) { return this->parseSplat(op, loc, builder); })
       .Case<triton::ExpandDimsOp>(
           [&](auto op) { return this->parseExpandDims(op, loc, builder); })
+      .Case<triton::ReshapeOp>(
+          [&](auto op) { return this->parseUnitReshape(op, loc, builder); })
       .Case<arith::ExtSIOp>(
           [&](auto op) { return this->parse(op.getIn(), loc, builder); })
       .Case<arith::DivSIOp>(
@@ -730,6 +732,32 @@ LogicalResult MaskState::parseSplat(triton::SplatOp splatOp,
   for (auto s : dstShape) {
     this->dims.push_back(builder.getIndexAttr(s));
     this->offsets.push_back(builder.getIndexAttr(0));
+  }
+  return success();
+}
+
+LogicalResult MaskState::parseUnitReshape(triton::ReshapeOp op,
+                                          const Location &loc,
+                                          OpBuilder &builder) {
+  auto axes = ConverterUtils::getUnitReshapeSourceAxes(op);
+  if (!axes)
+    return failure();
+  MaskState input;
+  if (failed(input.parse(op.getSrc(), loc, builder)))
+    return failure();
+  auto src = cast<RankedTensorType>(op.getSrc().getType());
+  if (!input.isMask() || input.getRank() != src.getRank())
+    return failure();
+  // A partially active removed unit axis may make the whole mask empty.
+  // Do not silently drop that condition; retain the general fallback.
+  for (int64_t axis = 0; axis < src.getRank(); ++axis)
+    if (src.getDimSize(axis) == 1 &&
+        (getConstantIntValue(input.dims[axis]) != 1 ||
+         getConstantIntValue(input.offsets[axis]) != 0))
+      return failure();
+  for (int64_t axis : *axes) {
+    dims.push_back(axis < 0 ? builder.getIndexAttr(1) : input.dims[axis]);
+    offsets.push_back(axis < 0 ? builder.getIndexAttr(0) : input.offsets[axis]);
   }
   return success();
 }

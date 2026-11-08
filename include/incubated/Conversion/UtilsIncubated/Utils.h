@@ -45,6 +45,12 @@ namespace mlir {
 
 namespace ConverterUtils {
 
+// Map destination axes to source axes for an order-preserving unit-only
+// reshape. -1 denotes a newly inserted unit axis. Reject real dimension
+// products, encoded layouts and allow_reorder views.
+std::optional<SmallVector<int64_t>>
+getUnitReshapeSourceAxes(triton::ReshapeOp op);
+
 const std::string GeneratedByMakeTensorPtrTAG = "GeneratedByMakeTensorPtr";
 const std::string discreteMaskAttrName = "DiscreteMask";
 const std::string discreteAttrName = "DiscreteMemAccess";

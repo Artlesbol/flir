@@ -956,6 +956,47 @@ LogicalResult PtrAnalysis::visitOperandSplat(triton::SplatOp splatOp,
   return success();
 }
 
+LogicalResult PtrAnalysis::visitOperandUnitReshape(triton::ReshapeOp op,
+                                                   PtrState &state,
+                                                   Location loc,
+                                                   OpBuilder &builder) {
+  auto axes = mlir::ConverterUtils::getUnitReshapeSourceAxes(op);
+  if (!axes)
+    return failure();
+  PtrState input;
+  if (failed(visitOperand(op.getSrc(), input, loc, builder)) ||
+      input.isBlockPtr())
+    return failure();
+  auto src = cast<RankedTensorType>(op.getSrc().getType());
+  auto dst = cast<RankedTensorType>(op.getType());
+  SmallVector<int64_t> destinationAxes(src.getRank(), -1);
+  SmallVector<StateInfo> infos;
+  SmallVector<OpFoldResult> sizes;
+  for (auto [axis, sourceAxis] : llvm::enumerate(*axes)) {
+    sizes.push_back(builder.getIndexAttr(dst.getDimSize(axis)));
+    if (sourceAxis < 0)
+      infos.emplace_back(builder.getIndexAttr(0), builder.getIndexAttr(1),
+                         axis);
+    else
+      destinationAxes[sourceAxis] = axis;
+  }
+  for (auto info : input.stateInfo) {
+    if (info.dimIndex >= destinationAxes.size())
+      return failure();
+    int64_t axis = destinationAxes[info.dimIndex];
+    if (axis < 0)
+      continue; // A removed unit axis contributes zero to the address.
+    info.dimIndex = axis;
+    infos.push_back(info);
+  }
+  llvm::stable_sort(infos, [](const StateInfo &a, const StateInfo &b) {
+    return a.dimIndex < b.dimIndex;
+  });
+  state.updatePtrState(infos, sizes, input.source, input.offset, loc, builder,
+                       input.shouldLinearize);
+  return success();
+}
+
 LogicalResult
 PtrAnalysis::visitOperandExpandDims(triton::ExpandDimsOp expandDimsOp,
                                     PtrState &state, const Location loc,
@@ -1343,6 +1384,8 @@ LogicalResult PtrAnalysis::visitOperand(Value operand, PtrState &state,
     return visitOperandSplat(op, state, loc, builder);
   } else if (auto op = operand.getDefiningOp<triton::ExpandDimsOp>()) {
     return visitOperandExpandDims(op, state, loc, builder);
+  } else if (auto op = operand.getDefiningOp<triton::ReshapeOp>()) {
+    return visitOperandUnitReshape(op, state, loc, builder);
   } else if (auto op = operand.getDefiningOp<triton::AddPtrOp>()) {
     return visitOperandAddptr(op, state, loc, builder);
   } else if (auto op = operand.getDefiningOp<arith::ConstantOp>()) {

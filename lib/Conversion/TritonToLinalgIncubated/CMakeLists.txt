@@ -8,6 +8,7 @@ add_triton_library(TritonToLinalgIncubated
         FunctionConverter.cpp
         ArgMinMaxConverter.cpp
         TritonOpConverter.cpp
+        IntegerDivision.cpp
         HoistBroadcast.cpp
         BlockPtrAnalysis.cpp
         MaskAnalysis.cpp

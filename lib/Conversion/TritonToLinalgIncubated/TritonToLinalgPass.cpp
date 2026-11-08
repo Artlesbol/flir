@@ -540,6 +540,18 @@ void TritonToLinalgIncubatedPass::addDynamicLegal(
 
         return this->namedOps || !operateOnTensors;
       });
+
+  auto architecture =
+      getOperation()->getAttrOfType<hacc::TargetAttr>("hacc.target");
+  if (!compileOn91095Flag && architecture &&
+      architecture.getTarget().getValue().starts_with("Ascend910B"))
+    target.addDynamicallyLegalOp<arith::DivSIOp, arith::DivUIOp, arith::RemSIOp,
+                                 arith::RemUIOp>([this](Operation *op) {
+      if (TTOpConverters::needsExactIntegerDivision(op))
+        return false;
+      return this->namedOps ||
+             !isa<RankedTensorType>(op->getResult(0).getType());
+    });
 }
 
 void TritonToLinalgIncubatedPass::
@@ -684,6 +696,12 @@ void TritonToLinalgIncubatedPass::populateTritonToLinalgConversionPatterns(
 
   // Add convert pattern for CustomOp.
   patterns.add<CustomOpConverter>(patterns.getContext());
+
+  auto architecture =
+      getOperation()->getAttrOfType<hacc::TargetAttr>("hacc.target");
+  if (!compileOn91095Flag && architecture &&
+      architecture.getTarget().getValue().starts_with("Ascend910B"))
+    TTOpConverters::populateExactIntegerDivisionPatterns(patterns);
 
   if (!this->namedOps) {
     linalg::populateElementwiseToLinalgConversionPatterns(patterns);

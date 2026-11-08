@@ -193,6 +193,9 @@ private:
   LogicalResult parseExpandDims(triton::ExpandDimsOp expandDimsOp,
                                 const Location &loc, OpBuilder &builder);
 
+  LogicalResult parseUnitReshape(triton::ReshapeOp op, const Location &loc,
+                                 OpBuilder &builder);
+
   // Operand is the result of insert
   LogicalResult parseInsert(tensor::InsertOp insertOp, const Location &loc,
                             OpBuilder &builder);
