@@ -166,6 +166,11 @@ template <typename Op> struct ExactIntegerDivision : OpConversionPattern<Op> {
       };
       result = rewriter.create<arith::DivSIOp>(loc, exactExtend(lhs),
                                                exactExtend(rhs));
+      if constexpr (isRemainder) {
+        Value q = rewriter.create<arith::TruncIOp>(loc, type, result);
+        Value product = rewriter.create<arith::MulIOp>(loc, q, rhs);
+        result = rewriter.create<arith::SubIOp>(loc, lhs, product);
+      }
     }
     if (result.getType() != type)
       result = rewriter.create<arith::TruncIOp>(loc, type, result);
@@ -186,8 +191,10 @@ bool needsExactIntegerDivision(Operation *op) {
   auto divisor = splatInteger(op->getOperand(1));
   if (divisor && divisor->isZero())
     return false; // Preserve source undefined behavior for division by zero.
-  // Dynamic rem already uses exact scalar integer arithmetic in this SDK.
-  return !isa<arith::RemSIOp, arith::RemUIOp>(op) || divisor.has_value();
+  // Dynamic signed rem already uses exact scalar arithmetic. Dynamic remui
+  // instead reaches an unsupported unsigned comparison in this SDK's HFusion
+  // conversion; use the same exact quotient and reconstruct its remainder.
+  return !isa<arith::RemSIOp>(op) || divisor.has_value();
 }
 
 void populateExactIntegerDivisionPatterns(RewritePatternSet &patterns) {

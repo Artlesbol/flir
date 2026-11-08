@@ -66,7 +66,8 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 // CHECK-NOT: arith.extui
 // CHECK: arith.divsi {{.*}} : tensor<8xi64>
 // CHECK: arith.trunci {{.*}} : tensor<8xi64> to tensor<8xi32>
-// CHECK: arith.remui {{.*}} : tensor<8xi32>
+// CHECK: arith.muli {{.*}} : tensor<8xi32>
+// CHECK: arith.subi {{.*}} : tensor<8xi32>
 // LEGACY-LABEL: func.func @unsigned_dynamic
 // LEGACY: arith.divui {{.*}} : tensor<8xi32>
 module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
