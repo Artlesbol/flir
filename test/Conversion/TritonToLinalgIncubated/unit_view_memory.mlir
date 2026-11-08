@@ -1,4 +1,5 @@
 // RUN: triton-shared-opt %s --triton-to-structured-incubated --triton-to-linalg-incubated='named-ops=true' --split-input-file | FileCheck %s
+// REQUIRES: flir-incubated
 
 // CHECK-LABEL: func.func @unit_views
 // CHECK-NOT: DiscreteMemAccess

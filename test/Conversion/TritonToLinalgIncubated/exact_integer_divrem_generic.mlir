@@ -1,4 +1,5 @@
 // RUN: triton-shared-opt %s --triton-to-linalg-incubated --split-input-file | FileCheck %s
+// REQUIRES: flir-incubated
 
 // CHECK-LABEL: func.func @generic_constant
 // CHECK: linalg.generic

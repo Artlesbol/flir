@@ -1,5 +1,6 @@
 // RUN: triton-shared-opt %s --triton-to-linalg-incubated='named-ops=true' --split-input-file | FileCheck %s
 // RUN: triton-shared-opt %s --triton-to-linalg-incubated='named-ops=true compile-on-910-95=true' --split-input-file | FileCheck %s --check-prefix=LEGACY
+// REQUIRES: flir-incubated
 
 // CHECK-LABEL: func.func @signed_constant
 // CHECK-NOT: arith.divsi
