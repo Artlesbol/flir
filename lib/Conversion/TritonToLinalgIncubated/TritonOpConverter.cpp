@@ -2847,7 +2847,8 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
       // and bounded column DMA, without padding UB to match the GM pitch.
       auto element = type ? type.getElementType() : Type{};
       if (strided && type.getRank() == 2 && strides[0] > 0 && strides[1] > 1 &&
-          (element.isF16() || element.isBF16() || element.isF32()))
+          (element.isF16() || element.isBF16() || element.isF32()) &&
+          strides[0] <= UINT32_MAX / (element.getIntOrFloatBitWidth() / 8))
         stridedStores.push_back(store);
     }
     if (isa<arith::BitcastOp, hivm::BitcastOp>(op))
@@ -2867,6 +2868,28 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
     }
   }
   for (auto store : stridedStores) {
+    // Admit only fully traceable Cube branches. Unlike the existing custom
+    // consumer legalization, this store rewrite must leave opaque/control-flow
+    // forwarding on its native path, without introducing a new rejection.
+    SmallVector<Value> pending{store.getSource()};
+    llvm::DenseSet<Value> visited;
+    bool hasCube = false, opaqueCube = false;
+    while (!pending.empty()) {
+      Value value = pending.pop_back_val();
+      if (!visited.insert(value).second)
+        continue;
+      Operation *producer = value.getDefiningOp();
+      if (isa_and_nonnull<linalg::MatmulOp, linalg::BatchMatmulOp>(producer)) {
+        hasCube = true;
+      } else if (producer && canForwardCubeResult(producer)) {
+        llvm::append_range(pending, producer->getOperands());
+      } else {
+        llvm::DenseSet<Value> forwarded;
+        opaqueCube |= hasForwardedCubeResult(value, forwarded);
+      }
+    }
+    if (!hasCube || opaqueCube)
+      continue;
     auto source = rewrite(store.getSource(), store);
     if (failed(source))
       return failure();
