@@ -2149,8 +2149,16 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
   auto originalResultType = resultType;
   bool bitwise = elemType.isF16() || elemType.isBF16() || elemType.isF32();
   if (bitwise) {
+    // Keep storage casts on flat tensors. CANN can otherwise move the
+    // short-row reshape across the load but leave the bitcast reading its
+    // original padded allocation instead of the loaded compact buffer.
+    auto flatType = RankedTensorType::get({count}, elemType);
+    Value shape = rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI64TensorAttr({count}));
+    lhs = rewriter.create<tensor::ReshapeOp>(loc, flatType, lhs, shape);
+    rhs = rewriter.create<tensor::ReshapeOp>(loc, flatType, rhs, shape);
     elemType = rewriter.getIntegerType(elemType.getIntOrFloatBitWidth());
-    auto bitsType = RankedTensorType::get(inputType.getShape(), elemType);
+    auto bitsType = RankedTensorType::get({count}, elemType);
     lhs = rewriter.create<arith::BitcastOp>(loc, bitsType, lhs);
     rhs = rewriter.create<arith::BitcastOp>(loc, bitsType, rhs);
     resultType = RankedTensorType::get(resultType.getShape(), elemType);
@@ -2186,8 +2194,19 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
       value = rewriter.create<tensor::ReshapeOp>(loc, originalResultType, value,
                                                  shape);
     }
-    if (bitwise)
-      value = rewriter.create<arith::BitcastOp>(loc, originalResultType, value);
+    if (bitwise) {
+      Value shape = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getI64TensorAttr({2 * count}));
+      auto flatBits = RankedTensorType::get({2 * count}, elemType);
+      value = rewriter.create<tensor::ReshapeOp>(loc, flatBits, value, shape);
+      auto flatType = RankedTensorType::get(
+          {2 * count}, originalResultType.getElementType());
+      value = rewriter.create<arith::BitcastOp>(loc, flatType, value);
+      Value resultShape = rewriter.create<arith::ConstantOp>(
+          loc, rewriter.getI64TensorAttr(originalResultType.getShape()));
+      value = rewriter.create<tensor::ReshapeOp>(loc, originalResultType, value,
+                                               resultShape);
+    }
     rewriter.replaceOp(op, value);
   };
   // Keep the two channels compact before transposition. The stride-2 slice
@@ -2807,9 +2826,25 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
   };
 
   SmallVector<Operation *> consumers;
+  SmallVector<bufferization::MaterializeInDestinationOp> stridedStores;
   module.walk([&](Operation *op) {
     if (!isAscend910B(op))
       return;
+    if (auto store = dyn_cast<bufferization::MaterializeInDestinationOp>(op)) {
+      auto type = dyn_cast<MemRefType>(store.getDest().getType());
+      SmallVector<int64_t> strides;
+      int64_t offset;
+#if LLVM_VERSION_MAJOR < 22
+      bool strided = type && succeeded(getStridesAndOffset(type, strides, offset));
+#else
+      bool strided = type && succeeded(type.getStridesAndOffset(strides, offset));
+#endif
+      // The 910B NZ2ND Fixpipe ABI only honors the destination row stride.
+      // Keep native unit-column matrix stores; route non-unit columns through
+      // an explicit Cube-to-Vector load and the normal Vector store instead.
+      if (strided && type.getRank() == 2 && strides.back() != 1)
+        stridedStores.push_back(store);
+    }
     if (isa<arith::BitcastOp, hivm::BitcastOp>(op))
       consumers.push_back(op);
     else if (auto custom = dyn_cast<hivm::CustomOp>(op))
@@ -2825,6 +2860,17 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
         return failure();
       operand.set(*replacement);
     }
+  }
+  for (auto store : stridedStores) {
+    auto source = rewrite(store.getSource(), store);
+    if (failed(source))
+      return failure();
+    if (*source == store.getSource())
+      continue;
+    rewriter.setInsertionPoint(store);
+    rewriter.create<hivm::StoreOp>(store.getLoc(), TypeRange{}, *source,
+                                  store.getDest());
+    rewriter.eraseOp(store);
   }
   return success();
 }
