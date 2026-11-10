@@ -2880,7 +2880,11 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
         continue;
       Operation *producer = value.getDefiningOp();
       if (isa_and_nonnull<linalg::MatmulOp, linalg::BatchMatmulOp>(producer)) {
-        hasCube = true;
+        auto type = dyn_cast<RankedTensorType>(value.getType());
+        if (type && type.hasStaticShape() && !type.getEncoding())
+          hasCube = true;
+        else
+          opaqueCube = true;
       } else if (producer && canForwardCubeResult(producer)) {
         llvm::append_range(pending, producer->getOperands());
       } else {
