@@ -1,4 +1,6 @@
-// RUN: triton-shared-opt --triton-to-linalg='named-ops=true' --split-input-file %s | FileCheck %s
+// RUN: triton-shared-opt --triton-to-linalg-incubated='named-ops=true' --split-input-file %s | FileCheck %s
+// RUN: triton-shared-opt --triton-to-linalg-incubated="named-ops=true compile-on-910-95=true" --split-input-file %s | FileCheck %s --check-prefix=LEGACY --implicit-check-not=flagtree.cube_to_vector
+// LEGACY: module
 // REQUIRES: flir-incubated
 
 // CHECK-LABEL: func.func @strided_cube_writeback(
@@ -9,7 +11,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
     %zero = arith.constant 0.0 : f32
     %empty = tensor.empty() : tensor<32x16xf32>
     %init = linalg.fill ins(%zero : f32) outs(%empty : tensor<32x16xf32>) -> tensor<32x16xf32>
-    %dot = linalg.matmul {input_precision = "ieee"} ins(%a, %b : tensor<32x16xf32>, tensor<16x16xf32>) outs(%init : tensor<32x16xf32>) -> tensor<32x16xf32>
+    %dot = tt.dot %a, %b, %init, inputPrecision = ieee : tensor<32x16xf32> * tensor<16x16xf32> -> tensor<32x16xf32>
     bufferization.materialize_in_destination %dot in writable %out : (tensor<32x16xf32>, memref<32x16xf32, strided<[256, 16], offset: ?>>) -> ()
     return
   }
@@ -24,7 +26,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
     %zero = arith.constant 0.0 : f32
     %empty = tensor.empty() : tensor<32x16xf32>
     %init = linalg.fill ins(%zero : f32) outs(%empty : tensor<32x16xf32>) -> tensor<32x16xf32>
-    %dot = linalg.matmul {input_precision = "ieee"} ins(%a, %b : tensor<32x16xf32>, tensor<16x16xf32>) outs(%init : tensor<32x16xf32>) -> tensor<32x16xf32>
+    %dot = tt.dot %a, %b, %init, inputPrecision = ieee : tensor<32x16xf32> * tensor<16x16xf32> -> tensor<32x16xf32>
     bufferization.materialize_in_destination %dot in writable %out : (tensor<32x16xf32>, memref<32x16xf32, strided<[16, 1], offset: ?>>) -> ()
     return
   }
@@ -40,7 +42,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
     %zero = arith.constant 0.0 : f32
     %empty = tensor.empty() : tensor<32x16xf32>
     %init = linalg.fill ins(%zero : f32) outs(%empty : tensor<32x16xf32>) -> tensor<32x16xf32>
-    %dot = linalg.matmul {input_precision = "ieee"} ins(%a, %b : tensor<32x16xf32>, tensor<16x16xf32>) outs(%init : tensor<32x16xf32>) -> tensor<32x16xf32>
+    %dot = tt.dot %a, %b, %init, inputPrecision = ieee : tensor<32x16xf32> * tensor<16x16xf32> -> tensor<32x16xf32>
     bufferization.materialize_in_destination %dot in writable %out : (tensor<32x16xf32>, memref<32x16xf32, strided<[?, ?], offset: ?>>) -> ()
     return
   }
@@ -55,7 +57,7 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
     %zero = arith.constant 0.0 : f32
     %empty = tensor.empty() : tensor<32x16xf32>
     %init = linalg.fill ins(%zero : f32) outs(%empty : tensor<32x16xf32>) -> tensor<32x16xf32>
-    %dot = linalg.matmul {input_precision = "ieee"} ins(%a, %b : tensor<32x16xf32>, tensor<16x16xf32>) outs(%init : tensor<32x16xf32>) -> tensor<32x16xf32>
+    %dot = tt.dot %a, %b, %init, inputPrecision = ieee : tensor<32x16xf32> * tensor<16x16xf32> -> tensor<32x16xf32>
     bufferization.materialize_in_destination %dot in writable %out : (tensor<32x16xf32>, memref<32x16xf32, strided<[-256, 16], offset: ?>>) -> ()
     return
   }

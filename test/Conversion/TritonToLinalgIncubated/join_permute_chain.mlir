@@ -1,4 +1,4 @@
-// RUN: triton-shared-opt --triton-to-linalg='named-ops=true' %s | FileCheck %s
+// RUN: triton-shared-opt --triton-to-linalg-incubated='named-ops=true' %s | FileCheck %s
 // REQUIRES: flir-incubated
 // CHECK-LABEL: func.func @join_permute_chain(
 // CHECK: arith.bitcast {{.*}} : tensor<1024xf32> to tensor<1024xi32>
