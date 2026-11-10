@@ -2205,7 +2205,7 @@ JoinConverter::matchAndRewrite(triton::JoinOp op, OpAdaptor adaptor,
       Value resultShape = rewriter.create<arith::ConstantOp>(
           loc, rewriter.getI64TensorAttr(originalResultType.getShape()));
       value = rewriter.create<tensor::ReshapeOp>(loc, originalResultType, value,
-                                               resultShape);
+                                                 resultShape);
     }
     rewriter.replaceOp(op, value);
   };
@@ -2835,14 +2835,18 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
       SmallVector<int64_t> strides;
       int64_t offset;
 #if LLVM_VERSION_MAJOR < 22
-      bool strided = type && succeeded(getStridesAndOffset(type, strides, offset));
+      bool strided =
+          type && succeeded(getStridesAndOffset(type, strides, offset));
 #else
-      bool strided = type && succeeded(type.getStridesAndOffset(strides, offset));
+      bool strided =
+          type && succeeded(type.getStridesAndOffset(strides, offset));
 #endif
       // The 910B NZ2ND Fixpipe ABI only honors the destination row stride.
       // Keep native unit-column matrix stores; route non-unit columns through
       // an explicit Cube-to-Vector load and the normal Vector store instead.
-      if (strided && type.getRank() == 2 && strides.back() != 1)
+      auto element = type ? type.getElementType() : Type{};
+      if (strided && type.getRank() == 2 && strides.back() != 1 &&
+          (element.isF16() || element.isBF16() || element.isF32()))
         stridedStores.push_back(store);
     }
     if (isa<arith::BitcastOp, hivm::BitcastOp>(op))
@@ -2868,8 +2872,27 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
     if (*source == store.getSource())
       continue;
     rewriter.setInsertionPoint(store);
-    rewriter.create<hivm::StoreOp>(store.getLoc(), TypeRange{}, *source,
-                                  store.getDest());
+    auto loc = store.getLoc();
+    auto scratchType = MemRefType::get(
+        {1024}, rewriter.getI32Type(), MemRefLayoutAttrInterface(),
+        hivm::AddressSpaceAttr::get(rewriter.getContext(),
+                                    hivm::AddressSpace::UB));
+    Value addresses = rewriter.create<memref::AllocOp>(loc, scratchType);
+    Value scratch = rewriter.create<memref::AllocOp>(loc, scratchType);
+    auto copy = rewriter.create<hivm::CustomOp>(
+        loc, TypeRange{}, "flagtree.strided_matrix_store", ValueRange{*source},
+        ValueRange{store.getDest(), addresses, scratch}, ValueRange{});
+    copy.setCoreType(hivm::TCoreType::VECTOR);
+    copy.setPipe(hivm::PIPE::PIPE_V);
+    copy.setVFMode(hivm::VFMode::SIMD);
+    auto element = cast<MemRefType>(store.getDest().getType()).getElementType();
+    StringRef suffix = element.isF16()    ? "half"
+                       : element.isBF16() ? "bf16"
+                                          : "float";
+    copy->setAttr("symbol",
+                  rewriter.getStringAttr(
+                      ("custom_flagtree_strided_store_" + suffix).str()));
+    copy->setAttr("max_rank", rewriter.getI64IntegerAttr(2));
     rewriter.eraseOp(store);
   }
   return success();
