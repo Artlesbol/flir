@@ -2842,10 +2842,11 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
           type && succeeded(type.getStridesAndOffset(strides, offset));
 #endif
       // The 910B NZ2ND Fixpipe ABI only honors the destination row stride.
-      // Keep native unit-column matrix stores; route non-unit columns through
-      // an explicit Cube-to-Vector load and the normal Vector store instead.
+      // Keep native unit-column and unknown/negative-stride stores. Route
+      // statically positive non-unit columns through a Cube-to-Vector load
+      // and bounded column DMA, without padding UB to match the GM pitch.
       auto element = type ? type.getElementType() : Type{};
-      if (strided && type.getRank() == 2 && strides.back() != 1 &&
+      if (strided && type.getRank() == 2 && strides[0] > 0 && strides[1] > 1 &&
           (element.isF16() || element.isBF16() || element.isF32()))
         stridedStores.push_back(store);
     }
