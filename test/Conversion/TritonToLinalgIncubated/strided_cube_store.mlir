@@ -111,3 +111,19 @@ module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
     return
   }
 }
+
+// -----
+// CHECK-LABEL: func.func @vector_arithmetic_store_unchanged(
+// CHECK-NOT: custom_flagtree_strided_store
+// CHECK: bufferization.materialize_in_destination
+module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
+  func.func @vector_arithmetic_store_unchanged(%a: tensor<32x16xf32>, %b: tensor<16x16xf32>, %v: tensor<32x16xf32>, %out: memref<32x16xf32, strided<[256, 16], offset: ?>>) {
+    %zero = arith.constant 0.0 : f32
+    %empty = tensor.empty() : tensor<32x16xf32>
+    %init = linalg.fill ins(%zero : f32) outs(%empty : tensor<32x16xf32>) -> tensor<32x16xf32>
+    %dot = tt.dot %a, %b, %init, inputPrecision = ieee : tensor<32x16xf32> * tensor<16x16xf32> -> tensor<32x16xf32>
+    %sum = arith.addf %dot, %v : tensor<32x16xf32>
+    bufferization.materialize_in_destination %sum in writable %out : (tensor<32x16xf32>, memref<32x16xf32, strided<[256, 16], offset: ?>>) -> ()
+    return
+  }
+}

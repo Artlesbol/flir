@@ -2885,7 +2885,11 @@ LogicalResult legalizeCubeVectorOperands(ModuleOp module) {
           hasCube = true;
         else
           opaqueCube = true;
-      } else if (producer && canForwardCubeResult(producer)) {
+      } else if (producer && (isCubeResultView(producer) ||
+                              isa<arith::TruncFOp>(producer))) {
+        // Float narrowing can fuse into Fixpipe too. Existing Vector
+        // arithmetic/transposes already have their native store path and must
+        // not acquire additional scratch or a new Cube/Vector junction here.
         llvm::append_range(pending, producer->getOperands());
       } else {
         llvm::DenseSet<Value> forwarded;
