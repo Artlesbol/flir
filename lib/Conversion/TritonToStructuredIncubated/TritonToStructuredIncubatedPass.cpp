@@ -27,6 +27,7 @@
 #include <optional>
 
 #if __has_include("bishengir/Dialect/HIVM/IR/HIVM.h")
+#include "bishengir/Dialect/HACC/IR/HACC.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 #endif
 #include "incubated/Conversion/UtilsIncubated/InterleaveOptimization.h"
