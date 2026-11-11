@@ -1040,10 +1040,66 @@ static void markDenseNativePermutations(ModuleOp module) {
   });
 }
 
+namespace {
+// CANN 9 can suballocate live packing temporaries at distinct first-buffer
+// offsets but reuse the same second-buffer base, losing the suballocation
+// offset. Express a proven complete pack as one concat before memory planning,
+// rather than a chain of destination-preserving partial writes.
+struct NormalizeCompleteSlicePack : OpRewritePattern<tensor::InsertSliceOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(tensor::InsertSliceOp tail,
+                                PatternRewriter &rewriter) const override {
+    auto type = dyn_cast<RankedTensorType>(tail.getType());
+    if (!type || type.getRank() != 1 || !type.hasStaticShape() ||
+        type.getEncoding() || !type.getElementType().isF32())
+      return failure();
+    int64_t extent = type.getDimSize(0);
+    SmallVector<std::pair<int64_t, Value>> pieces;
+    auto current = tail;
+    while (current) {
+      auto source = dyn_cast<RankedTensorType>(current.getSource().getType());
+      if (!source || source.getRank() != 1 || !source.hasStaticShape() ||
+          source.getEncoding() || current.getType() != type ||
+          current.getStaticOffsets().size() != 1 ||
+          current.getStaticStrides()[0] != 1)
+        return failure();
+      int64_t offset = current.getStaticOffsets()[0];
+      int64_t size = current.getStaticSizes()[0];
+      if (ShapedType::isDynamic(offset) || size <= 0 || size > extent ||
+          offset < 0 || offset > extent - size || source.getDimSize(0) != size)
+        return failure();
+      pieces.emplace_back(offset, current.getSource());
+      auto previous = current.getDest().getDefiningOp<tensor::InsertSliceOp>();
+      if (previous && !previous->hasOneUse())
+        return failure();
+      current = previous;
+    }
+    if (pieces.size() < 2)
+      return failure();
+    llvm::sort(pieces,
+               [](const auto &a, const auto &b) { return a.first < b.first; });
+    int64_t end = 0;
+    SmallVector<Value> sources;
+    for (auto [offset, value] : pieces) {
+      if (offset != end)
+        return failure();
+      end += cast<RankedTensorType>(value.getType()).getDimSize(0);
+      sources.push_back(value);
+    }
+    if (end != extent)
+      return failure();
+    rewriter.replaceOpWithNewOp<tensor::ConcatOp>(tail, type, 0, sources);
+    return success();
+  }
+};
+} // namespace
+
 void TritonToLinalgIncubatedPass::runOnOperation() {
   compileOn91095Flag = this->compileOn91095;
 
   auto moduleOp = getOperation();
+  auto multibuffer = moduleOp->getAttrOfType<BoolAttr>("flagtree.multibuffer");
+  moduleOp->removeAttr("flagtree.multibuffer");
 
   // Inverse pairs must fold before split is rewritten to channel slices.
   // These are targeted semantic rewrites, not an extra canonicalization pass
@@ -1246,6 +1302,18 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
   if (failed(TTOpConverters::legalizeCubeVectorOperands(moduleOp))) {
     signalPassFailure();
     return;
+  }
+
+  if (multibuffer && multibuffer.getValue() && !existDot && !existSIMTOp &&
+      !compileOn91095Flag && permutationTarget &&
+      permutationTarget.getTarget().getValue().starts_with("Ascend910B")) {
+    RewritePatternSet packPatterns(&getContext());
+    packPatterns.add<NormalizeCompleteSlicePack>(&getContext());
+    if (failed(applyPatternsGreedily(moduleOp, std::move(packPatterns),
+                                     permutationConfig))) {
+      signalPassFailure();
+      return;
+    }
   }
 
   // 8. Convert function prologue/epilogue.
