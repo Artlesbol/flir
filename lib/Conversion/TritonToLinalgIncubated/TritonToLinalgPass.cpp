@@ -1307,12 +1307,15 @@ void TritonToLinalgIncubatedPass::runOnOperation() {
   if (multibuffer && multibuffer.getValue() && !existDot && !existSIMTOp &&
       !compileOn91095Flag && permutationTarget &&
       permutationTarget.getTarget().getValue().starts_with("Ascend910B")) {
-    RewritePatternSet packPatterns(&getContext());
-    packPatterns.add<NormalizeCompleteSlicePack>(&getContext());
-    if (failed(applyPatternsGreedily(moduleOp, std::move(packPatterns),
-                                     permutationConfig))) {
-      signalPassFailure();
-      return;
+    // Visit only packing candidates. An extra whole-module greedy sweep can
+    // reorder unrelated constants even when no pattern matches.
+    SmallVector<tensor::InsertSliceOp> candidates;
+    moduleOp.walk([&](tensor::InsertSliceOp op) { candidates.push_back(op); });
+    NormalizeCompleteSlicePack pattern(&getContext());
+    PatternRewriter rewriter(&getContext());
+    for (auto op : llvm::reverse(candidates)) {
+      rewriter.setInsertionPoint(op);
+      (void)pattern.matchAndRewrite(op, rewriter);
     }
   }
 

@@ -197,15 +197,13 @@ void TritonToStructuredIncubatedPass::runOnOperation() {
     mixed |= isa<triton::DotOp, triton::DotScaledOp>(op);
   });
   if (mixed && arch && arch.getTarget().getValue().starts_with("Ascend910B")) {
-    RewritePatternSet projections(&getContext());
-    projections.add<ProjectSingletonLoads>(&getContext());
-    GreedyRewriteConfig config;
-    config.enableFolding(false).setRegionSimplificationLevel(
-        GreedySimplifyRegionLevel::Disabled);
-    if (failed(
-            applyPatternsGreedily(moduleOp, std::move(projections), config))) {
-      signalPassFailure();
-      return;
+    SmallVector<triton::LoadOp> candidates;
+    moduleOp.walk([&](triton::LoadOp load) { candidates.push_back(load); });
+    ProjectSingletonLoads pattern(&getContext());
+    PatternRewriter rewriter(&getContext());
+    for (auto load : candidates) {
+      rewriter.setInsertionPoint(load);
+      (void)pattern.matchAndRewrite(load, rewriter);
     }
   }
   ConversionTarget target(getContext());
