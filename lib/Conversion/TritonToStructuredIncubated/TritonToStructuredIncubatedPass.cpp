@@ -146,7 +146,12 @@ struct ProjectSingletonLoads : OpRewritePattern<triton::LoadOp> {
     auto base = pointer.getPtr().getDefiningOp<triton::SplatOp>();
     auto range = pointer.getOffset().getDefiningOp<triton::MakeRangeOp>();
     if (!base || !range ||
-        range.getEnd() - range.getStart() != type.getNumElements())
+        int64_t(range.getEnd()) - range.getStart() != type.getNumElements())
+      return failure();
+    auto pointerType = dyn_cast<triton::PointerType>(base.getSrc().getType());
+    auto hints = load->getAttrOfType<StringAttr>("flagtree_hints");
+    if (!pointerType || pointerType.getAddressSpace() != 1 ||
+        (hints && !hints.getValue().empty()))
       return failure();
     SmallVector<tensor::ExtractSliceOp> slices;
     for (Operation *user : load->getUsers()) {
