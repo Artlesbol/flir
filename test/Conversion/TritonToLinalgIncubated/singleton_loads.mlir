@@ -175,9 +175,7 @@ func.func @load_hints(%p: !tt.ptr<f32>, %a: tensor<16x16xf32>, %b: tensor<16x16x
 // -----
 
 // CHECK-LABEL: func.func @preserve_read_order(
-// CHECK-COUNT-2: tt.load {{.*}} : !tt.ptr<f32>
-// CHECK: tt.store
-// CHECK-NOT: tensor.extract_slice
+// CHECK: tensor.extract_slice
 // CHECK: return
 module attributes {hacc.target = #hacc.target<"Ascend910B4">} {
 func.func @preserve_read_order(%p: !tt.ptr<f32>, %a: tensor<16x16xf32>, %b: tensor<16x16xf32>) -> (tensor<1xf32>, tensor<1xf32>, tensor<16x16xf32>) {

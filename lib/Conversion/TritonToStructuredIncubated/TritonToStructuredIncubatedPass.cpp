@@ -62,6 +62,7 @@
 #include "incubated/Conversion/TritonToStructuredIncubated/MemOpConverter.h"
 #include "incubated/Conversion/TritonToStructuredIncubated/PtrAnalysis.h"
 #include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/SmallVectorExtras.h"
@@ -127,6 +128,37 @@ LogicalResult TritonToStructuredIncubatedPass::processSplatBinaryOperations(
 }
 
 namespace {
+// A coefficient pointer must remain a read-only function input. Do not create
+// scalar reads when the same input is written, escapes, or is forwarded through
+// an operation whose pointer uses cannot be proved read-only.
+static bool isReadOnlyCoefficientInput(Value pointer) {
+  while (auto add = pointer.getDefiningOp<triton::AddPtrOp>())
+    pointer = add.getPtr();
+  auto argument = dyn_cast<BlockArgument>(pointer);
+  if (!argument ||
+      !isa<triton::FuncOp, func::FuncOp>(argument.getOwner()->getParentOp()))
+    return false;
+  SmallVector<Value> pending{pointer};
+  llvm::DenseSet<Value> visited;
+  while (!pending.empty()) {
+    Value value = pending.pop_back_val();
+    if (!visited.insert(value).second)
+      continue;
+    for (OpOperand &use : value.getUses()) {
+      auto *user = use.getOwner();
+      if (isa<triton::LoadOp>(user) && use.getOperandNumber() == 0)
+        continue;
+      if (use.getOperandNumber() != 0 ||
+          !isa<triton::AddPtrOp, triton::SplatOp, triton::BroadcastOp,
+               triton::ExpandDimsOp, triton::ReshapeOp,
+               triton::MakeTensorPtrOp>(user))
+        return false;
+      llvm::append_range(pending, user->getResults());
+    }
+  }
+  return true;
+}
+
 // Project non-volatile coefficient loads before the MIX partitioner turns
 // singleton Vector extracts into GM sharing and Cube-side waits. Keep the new
 // reads at the original load, so intervening writes cannot change the value.
@@ -151,7 +183,8 @@ struct ProjectSingletonLoads : OpRewritePattern<triton::LoadOp> {
     auto pointerType = dyn_cast<triton::PointerType>(base.getSrc().getType());
     auto hints = load->getAttrOfType<StringAttr>("flagtree_hints");
     if (!pointerType || pointerType.getAddressSpace() != 1 ||
-        (hints && !hints.getValue().empty()))
+        (hints && !hints.getValue().empty()) ||
+        !isReadOnlyCoefficientInput(base.getSrc()))
       return failure();
     SmallVector<tensor::ExtractSliceOp> slices;
     for (Operation *user : load->getUsers()) {
