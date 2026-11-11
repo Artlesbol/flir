@@ -125,8 +125,83 @@ LogicalResult TritonToStructuredIncubatedPass::processSplatBinaryOperations(
   return success();
 }
 
+namespace {
+// Project non-volatile coefficient loads before the MIX partitioner turns
+// singleton Vector extracts into GM sharing and Cube-side waits. Keep the new
+// reads at the original load, so intervening writes cannot change the value.
+struct ProjectSingletonLoads : OpRewritePattern<triton::LoadOp> {
+  using OpRewritePattern::OpRewritePattern;
+  LogicalResult matchAndRewrite(triton::LoadOp load,
+                                PatternRewriter &rewriter) const override {
+    auto type = dyn_cast<RankedTensorType>(load.getType());
+    if (!type || type.getRank() != 1 || !type.hasStaticShape() ||
+        type.getEncoding() || !type.getElementType().isF32() ||
+        load.getMask() || load.getOther() || load.getIsVolatile() ||
+        !load.getBoundaryCheck().empty() || load->use_empty())
+      return failure();
+    auto pointer = load.getPtr().getDefiningOp<triton::AddPtrOp>();
+    if (!pointer)
+      return failure();
+    auto base = pointer.getPtr().getDefiningOp<triton::SplatOp>();
+    auto range = pointer.getOffset().getDefiningOp<triton::MakeRangeOp>();
+    if (!base || !range ||
+        range.getEnd() - range.getStart() != type.getNumElements())
+      return failure();
+    SmallVector<tensor::ExtractSliceOp> slices;
+    for (Operation *user : load->getUsers()) {
+      auto slice = dyn_cast<tensor::ExtractSliceOp>(user);
+      if (!slice || slice.getSource() != load.getResult() ||
+          slice.getType().getRank() != 1 || slice.getType().getEncoding() ||
+          slice.getStaticSizes() != ArrayRef<int64_t>{1} ||
+          slice.getStaticStrides() != ArrayRef<int64_t>{1} ||
+          slice.getStaticOffsets()[0] < 0 ||
+          slice.getStaticOffsets()[0] >= type.getNumElements())
+        return failure();
+      slices.push_back(slice);
+    }
+    llvm::SmallDenseMap<int64_t, Value> scalars;
+    for (auto slice : slices) {
+      int64_t index = slice.getStaticOffsets()[0];
+      Value &scalar = scalars[index];
+      if (!scalar) {
+        rewriter.setInsertionPoint(load);
+        Value offset = rewriter.create<arith::ConstantIntOp>(
+            load.getLoc(), int64_t(range.getStart()) + index, 32);
+        Value ptr = rewriter.create<triton::AddPtrOp>(
+            load.getLoc(), base.getSrc().getType(), base.getSrc(), offset);
+        scalar = rewriter.create<triton::LoadOp>(load.getLoc(), ptr, Value{},
+                                                 Value{}, load.getCache(),
+                                                 load.getEvict(), false);
+      }
+      rewriter.setInsertionPoint(slice);
+      rewriter.replaceOpWithNewOp<triton::SplatOp>(slice, slice.getType(),
+                                                   scalar);
+    }
+    rewriter.eraseOp(load);
+    return success();
+  }
+};
+} // namespace
+
 void TritonToStructuredIncubatedPass::runOnOperation() {
   auto moduleOp = getOperation();
+  auto arch = moduleOp->getAttrOfType<hacc::TargetAttr>("hacc.target");
+  bool mixed = false;
+  moduleOp.walk([&](Operation *op) {
+    mixed |= isa<triton::DotOp, triton::DotScaledOp>(op);
+  });
+  if (mixed && arch && arch.getTarget().getValue().starts_with("Ascend910B")) {
+    RewritePatternSet projections(&getContext());
+    projections.add<ProjectSingletonLoads>(&getContext());
+    GreedyRewriteConfig config;
+    config.enableFolding(false).setRegionSimplificationLevel(
+        GreedySimplifyRegionLevel::Disabled);
+    if (failed(
+            applyPatternsGreedily(moduleOp, std::move(projections), config))) {
+      signalPassFailure();
+      return;
+    }
+  }
   ConversionTarget target(getContext());
   RewritePatternSet canonicalizerPatterns(&getContext());
 
